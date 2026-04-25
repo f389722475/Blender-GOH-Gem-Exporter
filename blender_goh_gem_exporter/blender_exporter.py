@@ -34,6 +34,10 @@ from .goh_core import (
     classify_triangle_sides,
     encode_mesh_vertex_stream,
     read_animation,
+    read_material,
+    read_mesh,
+    read_model,
+    read_volume,
     sanitized_file_stem,
     write_export_bundle,
 )
@@ -48,6 +52,39 @@ GOH_TRANSFORM_BLOCK_ITEMS = (
     ("ORIENTATION", "Orientation", "Prefer a pure {Orientation} block when the transform has no translation"),
     ("MATRIX34", "Matrix34", "Always write a {Matrix34} block"),
 )
+
+GOH_TEXTURE_PROP_KEYS = (
+    "goh_diffuse",
+    "goh_bump",
+    "goh_specular",
+    "goh_lightmap",
+    "goh_mask",
+    "goh_height",
+    "goh_diffuse1",
+    "goh_simple",
+    "goh_envmap_texture",
+    "goh_bump_volume",
+)
+
+GOH_VOLUME_KIND_VALUES = {"polyhedron", "box", "sphere", "cylinder"}
+GOH_PHYSICS_PROP_KEYS = (
+    "goh_physics_source",
+    "goh_physics_role",
+    "goh_physics_weight",
+    "goh_physics_delay",
+    "goh_physics_frequency",
+    "goh_physics_damping",
+    "goh_physics_jitter",
+    "goh_physics_rotation",
+)
+GOH_PHYSICS_ACTION_PREFIXES = (
+    "goh_recoil_",
+    "goh_recoil_source_",
+    "goh_linked_recoil_",
+    "goh_directional_recoil_",
+    "goh_impact_",
+)
+GOH_PHYSICS_NLA_PREFIX = "GOH Physics"
 
 
 @dataclass
@@ -507,9 +544,58 @@ def _build_translation_overrides() -> dict[str, dict[tuple[str, str], str]]:
             "Leave",
             "Blender -> GOH (Legacy)",
             "None / GOH Native",
+            "Auto / Match Imported Model",
             "Auto",
             "Orientation",
             "Matrix34",
+            "Validation Scope",
+            "Validate GOH Scene",
+            "Auto-Fill GOH Materials",
+            "Import GOH Model",
+            "Assign LOD Files",
+            "Volume From Bounds",
+            "Create Recoil Action",
+            "Assign Physics Link",
+            "Bake Linked Recoil",
+            "Bake Directional Set",
+            "Bake Impact Response",
+            "Create Armor Ripple",
+            "Load Role Defaults",
+            "Clear Physics Links",
+            "LOD Levels",
+            "Write OFF",
+            "Helper Volume",
+            "Recoil Axis",
+            "Direction Set",
+            "Clip Prefix",
+            "Impact Clip",
+            "Ripple Amplitude",
+            "Ripple Radius",
+            "Ripple Waves",
+            "Physics Power",
+            "Duration Scale",
+            "Import Materials",
+            "Load Diffuse Textures",
+            "LOD0 Only",
+            "Link Role",
+            "Link Weight",
+            "Create NLA Clips",
+            "Clear Baked Actions",
+            "Body Spring",
+            "Antenna Whip",
+            "Accessory Jitter",
+            "Follower",
+            "Suspension Bounce",
+            "Track Rumble",
+            "Use Stored Links",
+            "Four Fire Directions",
+            "Six Local Axes",
+            "Local +X",
+            "Local -X",
+            "Local +Y",
+            "Local -Y",
+            "Local +Z",
+            "Local -Z",
         }
     )
     translations: dict[str, dict[tuple[str, str], str]] = {}
@@ -695,6 +781,16 @@ class GOHBasisSettings(PropertyGroup):
 
 
 class GOHToolSettings(PropertyGroup):
+    validation_scope: EnumProperty(
+        name="Validation Scope",
+        items=(
+            ("SELECTED", "Selected", "Validate selected objects and their materials"),
+            ("VISIBLE", "Visible", "Validate visible objects in the current view layer"),
+            ("ALL", "All", "Validate every object in the scene"),
+        ),
+        default="VISIBLE",
+        translation_context="GOH_PRESET",
+    )
     transform_block: EnumProperty(
         name="Transform Block",
         items=GOH_TRANSFORM_BLOCK_ITEMS,
@@ -710,6 +806,190 @@ class GOHToolSettings(PropertyGroup):
         ),
         default="SELECTED",
         translation_context="GOH_PRESET",
+    )
+    material_overwrite: BoolProperty(
+        name="Overwrite Existing",
+        description="Allow the material auto-fill tool to replace existing GOH texture custom properties",
+        default=False,
+    )
+    lod_levels: IntProperty(
+        name="LOD Levels",
+        description="Number of additional LOD file entries to write after the base .ply file",
+        default=2,
+        min=0,
+        max=8,
+    )
+    lod_mark_off: BoolProperty(
+        name="Write OFF",
+        description="Also set goh_lod_off on selected mesh objects",
+        default=False,
+    )
+    helper_volume_kind: EnumProperty(
+        name="Helper Volume",
+        items=(
+            ("POLYHEDRON", "Polyhedron (.vol)", "Create a regular .vol collision helper from the selected mesh bounds"),
+            ("BOX", "Primitive Box", "Create an inline Box collision helper from the selected mesh bounds"),
+            ("SPHERE", "Primitive Sphere", "Create an inline Sphere collision helper from the selected mesh bounds"),
+            ("CYLINDER", "Primitive Cylinder", "Create an inline Cylinder collision helper from the selected mesh bounds"),
+        ),
+        default="BOX",
+        translation_context="GOH_PRESET",
+    )
+    recoil_axis: EnumProperty(
+        name="Recoil Axis",
+        items=(
+            ("X", "Local +X", "Move along local positive X"),
+            ("NEG_X", "Local -X", "Move along local negative X"),
+            ("Y", "Local +Y", "Move along local positive Y"),
+            ("NEG_Y", "Local -Y", "Move along local negative Y"),
+            ("Z", "Local +Z", "Move along local positive Z"),
+            ("NEG_Z", "Local -Z", "Move along local negative Z"),
+        ),
+        default="NEG_Y",
+        translation_context="GOH_PRESET",
+    )
+    recoil_distance: FloatProperty(
+        name="Distance",
+        description="Blender-unit recoil distance before GOH export scaling",
+        default=0.18,
+        min=0.0,
+        soft_max=5.0,
+    )
+    recoil_frames: IntProperty(
+        name="Frames",
+        description="Total baked recoil action length in frames",
+        default=12,
+        min=3,
+        max=240,
+    )
+    recoil_set_sequence: BoolProperty(
+        name="Write Sequence",
+        description="Write goh_sequence_name and goh_sequence_file for the generated recoil action",
+        default=True,
+    )
+    physics_direction_set: EnumProperty(
+        name="Direction Set",
+        items=(
+            ("FOUR_FIRE", "Four Fire Directions", "Bake fire_front, fire_back, fire_left, and fire_right recoil clips"),
+            ("SIX_LOCAL", "Six Local Axes", "Bake clips for all six local axes"),
+        ),
+        default="FOUR_FIRE",
+        translation_context="GOH_PRESET",
+    )
+    physics_clip_prefix: StringProperty(
+        name="Clip Prefix",
+        description="Prefix used when creating directional recoil clips",
+        default="fire",
+    )
+    physics_impact_clip_name: StringProperty(
+        name="Impact Clip",
+        description="Sequence/file name used by the impact-response bake",
+        default="hit",
+    )
+    physics_ripple_amplitude: FloatProperty(
+        name="Ripple Amplitude",
+        description="Maximum mesh shape-key ripple displacement in Blender units",
+        default=0.025,
+        min=0.0,
+        soft_max=0.5,
+    )
+    physics_ripple_radius: FloatProperty(
+        name="Ripple Radius",
+        description="Approximate radius around the 3D cursor affected by armor ripple shape keys",
+        default=1.25,
+        min=0.01,
+        soft_max=10.0,
+    )
+    physics_ripple_waves: IntProperty(
+        name="Ripple Waves",
+        description="Number of radial wave bands in the generated armor ripple",
+        default=2,
+        min=1,
+        max=12,
+    )
+    physics_power: FloatProperty(
+        name="Physics Power",
+        description="Global multiplier for linked physics, impact shake, and ripple intensity",
+        default=1.0,
+        min=0.0,
+        soft_max=4.0,
+    )
+    physics_duration_scale: FloatProperty(
+        name="Duration Scale",
+        description="Global multiplier for role-specific linked physics duration",
+        default=1.0,
+        min=0.2,
+        soft_max=3.0,
+    )
+    physics_create_nla_clips: BoolProperty(
+        name="Create NLA Clips",
+        description="Push generated multi-clip physics actions into NLA strips with GOH sequence metadata",
+        default=True,
+    )
+    physics_link_role: EnumProperty(
+        name="Link Role",
+        items=(
+            ("BODY_SPRING", "Body Spring", "Heavy vehicle hull recoil with a hard initial shove, low-frequency rebound, and visible rocking"),
+            ("ANTENNA_WHIP", "Antenna Whip", "Delayed flexible whip motion with large rotation and small translation"),
+            ("ACCESSORY_JITTER", "Accessory Jitter", "Loose external equipment with high-frequency rattling and asymmetric shake"),
+            ("FOLLOWER", "Follower", "Generic linked part with a mild, readable damped follow-through"),
+            ("SUSPENSION_BOUNCE", "Suspension Bounce", "Vehicle movement bounce with vertical travel, pitch, and soft recovery"),
+            ("TRACK_RUMBLE", "Track Rumble", "Track, wheel, and bogie movement rumble with fast low-amplitude vibration"),
+        ),
+        default="BODY_SPRING",
+        translation_context="GOH_PRESET",
+    )
+    physics_link_weight: FloatProperty(
+        name="Link Weight",
+        description="How strongly linked parts react to the source recoil",
+        default=1.0,
+        min=0.0,
+        soft_max=5.0,
+    )
+    physics_link_delay: IntProperty(
+        name="Delay",
+        description="Delay in frames before linked parts react",
+        default=2,
+        min=0,
+        max=120,
+    )
+    physics_link_frequency: FloatProperty(
+        name="Frequency",
+        description="Spring oscillation frequency for linked response",
+        default=0.0,
+        min=0.0,
+        soft_max=12.0,
+    )
+    physics_link_damping: FloatProperty(
+        name="Damping",
+        description="Response damping for linked spring motion",
+        default=0.0,
+        min=0.0,
+        soft_max=4.0,
+    )
+    physics_link_jitter: FloatProperty(
+        name="Jitter",
+        description="Deterministic secondary jitter amount added to linked parts",
+        default=0.0,
+        min=0.0,
+        soft_max=1.0,
+    )
+    physics_link_rotation: FloatProperty(
+        name="Rotation",
+        description="Maximum linked part rotation in degrees",
+        default=0.0,
+        min=0.0,
+        soft_max=45.0,
+    )
+    physics_include_scene_links: BoolProperty(
+        name="Use Stored Links",
+        description="Bake all scene objects whose goh_physics_source points at the active source, even if they are not selected",
+        default=True,
+    )
+    physics_clear_actions: BoolProperty(
+        name="Clear Baked Actions",
+        description="Also detach GOH physics active actions and GOH physics NLA tracks when clearing links",
+        default=False,
     )
 
 
@@ -749,6 +1029,830 @@ def _set_custom_text_prop(owner, key: str, value: str | None) -> None:
         owner[key] = text
     else:
         _remove_custom_prop(owner, key)
+
+
+def _write_text_block(name: str, content: str) -> bpy.types.Text:
+    text_block = bpy.data.texts.get(name) or bpy.data.texts.new(name)
+    text_block.clear()
+    text_block.write(content)
+    return text_block
+
+
+def _objects_for_tool_scope(context: bpy.types.Context, scope: str) -> list[bpy.types.Object]:
+    if scope == "SELECTED":
+        return list(context.selected_objects)
+    if scope == "VISIBLE":
+        return [
+            obj for obj in context.view_layer.objects
+            if obj.visible_get(view_layer=context.view_layer)
+        ]
+    return list(context.scene.objects)
+
+
+def _materials_for_tool_scope(context: bpy.types.Context, scope: str) -> list[bpy.types.Material]:
+    if scope == "ALL":
+        return [material for material in bpy.data.materials if material is not None]
+
+    materials: list[bpy.types.Material] = []
+    seen: set[int] = set()
+    for obj in _objects_for_tool_scope(context, scope):
+        if obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None:
+                continue
+            pointer = material.as_pointer()
+            if pointer in seen:
+                continue
+            seen.add(pointer)
+            materials.append(material)
+    return materials
+
+
+def _image_texture_stem(image: bpy.types.Image) -> str:
+    path = image.filepath_from_user() or image.filepath or image.name
+    return Path(path).stem.strip() or image.name.strip()
+
+
+def _image_source_path(image: bpy.types.Image) -> Path | None:
+    if image.packed_file is not None:
+        return None
+    raw_path = image.filepath_from_user() or image.filepath
+    if not raw_path:
+        return None
+    try:
+        return Path(bpy.path.abspath(raw_path))
+    except Exception:
+        return Path(raw_path)
+
+
+def _texture_role_from_name(stem: str) -> str | None:
+    lower = stem.lower()
+    checks: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("goh_bump", ("_n_n", "_normal", "normal", "bump")),
+        ("goh_specular", ("_n_s", "_spec", "_s", "spec", "gloss", "rough")),
+        ("goh_height", ("_hm", "_height", "height", "displace")),
+        ("goh_lightmap", ("_lightmap", "lightmap", "_lm", "_mask")),
+        ("goh_mask", ("_msk", "mask")),
+        ("goh_envmap_texture", ("envmap", "environment", "reflection")),
+        ("goh_diffuse1", ("_d1", "_diffuse1", "diffuse1")),
+        ("goh_diffuse", ("_c", "_d", "_diff", "diffuse", "albedo", "basecolor", "base_color", "color")),
+    )
+    for role, needles in checks:
+        if any(needle in lower for needle in needles):
+            return role
+    return None
+
+
+def _infer_material_texture_props(material: bpy.types.Material) -> dict[str, str]:
+    inferred: dict[str, str] = {}
+    if material.node_tree:
+        for node in material.node_tree.nodes:
+            if node.type != "TEX_IMAGE" or not node.image:
+                continue
+            stem = _image_texture_stem(node.image)
+            role = _texture_role_from_name(stem)
+            if role and role not in inferred:
+                inferred[role] = stem
+
+    # Common one-texture Blender materials often use the material name itself.
+    if "goh_diffuse" not in inferred:
+        role = _texture_role_from_name(material.name)
+        if role == "goh_diffuse":
+            inferred["goh_diffuse"] = sanitized_file_stem(material.name)
+    return inferred
+
+
+def _material_has_goh_texture(material: bpy.types.Material) -> bool:
+    return any(bool(material.get(key)) for key in GOH_TEXTURE_PROP_KEYS)
+
+
+def _is_tool_volume_object(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH":
+        return False
+    if bool(obj.get("goh_is_volume")) or bool(obj.get("Volume")):
+        return True
+    if obj.name.lower().endswith("_vol"):
+        return True
+    return any(collection.name == "GOH_VOLUMES" for collection in obj.users_collection)
+
+
+def _is_tool_obstacle_object(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH":
+        return False
+    return bool(obj.get("goh_is_obstacle")) or any(collection.name == "GOH_OBSTACLES" for collection in obj.users_collection)
+
+
+def _is_tool_area_object(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH":
+        return False
+    return bool(obj.get("goh_is_area")) or any(collection.name == "GOH_AREAS" for collection in obj.users_collection)
+
+
+def _is_tool_helper_object(obj: bpy.types.Object) -> bool:
+    return _is_tool_volume_object(obj) or _is_tool_obstacle_object(obj) or _is_tool_area_object(obj) or bool(obj.get("goh_basis_helper"))
+
+
+def _tool_export_name(obj: bpy.types.Object) -> str:
+    for key in ("goh_bone_name", "goh_volume_name", "goh_shape_name", "ID"):
+        value = obj.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return obj.name
+
+
+def _local_axis_vector(axis_key: str) -> Vector:
+    mapping = {
+        "X": Vector((1.0, 0.0, 0.0)),
+        "NEG_X": Vector((-1.0, 0.0, 0.0)),
+        "Y": Vector((0.0, 1.0, 0.0)),
+        "NEG_Y": Vector((0.0, -1.0, 0.0)),
+        "Z": Vector((0.0, 0.0, 1.0)),
+        "NEG_Z": Vector((0.0, 0.0, -1.0)),
+    }
+    return mapping.get(axis_key, Vector((0.0, -1.0, 0.0))).copy()
+
+
+def _physics_object_id(obj: bpy.types.Object) -> str:
+    return str(obj.get("goh_bone_name") or obj.get("goh_volume_name") or obj.name).strip()
+
+
+def _physics_action_name(prefix: str, obj: bpy.types.Object) -> str:
+    return f"{prefix}_{sanitized_file_stem(_physics_object_id(obj) or obj.name)}"
+
+
+def _physics_source_matches(obj: bpy.types.Object, source: bpy.types.Object) -> bool:
+    stored = str(obj.get("goh_physics_source") or "").strip().lower()
+    if not stored:
+        return False
+    names = {
+        source.name.lower(),
+        _physics_object_id(source).lower(),
+        str(source.get("goh_bone_name") or "").strip().lower(),
+    }
+    return stored in names
+
+
+def _physics_role_defaults(role: str) -> tuple[float, float, float, float]:
+    if role == "BODY_SPRING":
+        return (1.75, 1.85, 0.16, 8.0)
+    if role == "ANTENNA_WHIP":
+        return (0.75, 4.8, 0.18, 18.0)
+    if role == "ACCESSORY_JITTER":
+        return (0.85, 7.5, 0.24, 9.0)
+    if role == "SUSPENSION_BOUNCE":
+        return (1.45, 2.15, 0.18, 8.5)
+    if role == "TRACK_RUMBLE":
+        return (0.55, 10.0, 0.18, 3.5)
+    return (0.65, 2.4, 0.34, 4.0)
+
+
+def _physics_role_delay_default(role: str) -> int:
+    return {
+        "BODY_SPRING": 0,
+        "ANTENNA_WHIP": 2,
+        "ACCESSORY_JITTER": 1,
+        "SUSPENSION_BOUNCE": 0,
+        "TRACK_RUMBLE": 0,
+        "FOLLOWER": 1,
+    }.get(role, 1)
+
+
+def _physics_role_jitter_default(role: str) -> float:
+    return {
+        "BODY_SPRING": 0.10,
+        "ANTENNA_WHIP": 0.18,
+        "ACCESSORY_JITTER": 0.45,
+        "SUSPENSION_BOUNCE": 0.08,
+        "TRACK_RUMBLE": 0.36,
+        "FOLLOWER": 0.05,
+    }.get(role, 0.08)
+
+
+def _physics_role_duration_default(role: str) -> float:
+    return {
+        "BODY_SPRING": 1.65,
+        "ANTENNA_WHIP": 2.15,
+        "ACCESSORY_JITTER": 0.70,
+        "SUSPENSION_BOUNCE": 1.90,
+        "TRACK_RUMBLE": 0.58,
+        "FOLLOWER": 1.00,
+    }.get(role, 1.00)
+
+
+def _physics_role_from_object(obj: bpy.types.Object, settings: GOHToolSettings) -> str:
+    return str(obj.get("goh_physics_role") or settings.physics_link_role).strip().upper()
+
+
+def _physics_duration_scale(settings: GOHToolSettings, role: str) -> float:
+    global_scale = max(0.2, float(getattr(settings, "physics_duration_scale", 1.0)))
+    return max(0.2, _physics_role_duration_default(role) * global_scale)
+
+
+def _physics_role_duration_frames(settings: GOHToolSettings, role: str, base_frames: int) -> int:
+    return max(1, int(round(max(1, base_frames) * _physics_duration_scale(settings, role))))
+
+
+def _physics_object_clip_frames(obj: bpy.types.Object, settings: GOHToolSettings, base_frames: int) -> int:
+    role = _physics_role_from_object(obj, settings)
+    if role == "SOURCE":
+        return max(1, base_frames)
+    _weight, default_delay, _frequency, _damping, _jitter, _rotation = _physics_effective_link_values(settings, role)
+    delay = max(0, int(obj.get("goh_physics_delay", default_delay)))
+    return delay + _physics_role_duration_frames(settings, role, base_frames)
+
+
+def _physics_max_duration_frames(settings: GOHToolSettings, objects: Iterable[bpy.types.Object], base_frames: int) -> int:
+    frames = [
+        _physics_role_duration_frames(settings, _physics_role_from_object(obj, settings), base_frames)
+        for obj in objects
+        if _physics_role_from_object(obj, settings) != "SOURCE"
+    ]
+    return max([max(1, base_frames), *frames])
+
+
+def _physics_max_clip_frames(settings: GOHToolSettings, objects: Iterable[bpy.types.Object], base_frames: int) -> int:
+    frames = [_physics_object_clip_frames(obj, settings, base_frames) for obj in objects]
+    return max([max(1, base_frames), *frames])
+
+
+def _physics_max_duration_scale(settings: GOHToolSettings, objects: Iterable[bpy.types.Object]) -> float:
+    scales = [
+        _physics_duration_scale(settings, _physics_role_from_object(obj, settings))
+        for obj in objects
+        if _physics_role_from_object(obj, settings) != "SOURCE"
+    ]
+    return max([1.0, *scales])
+
+
+def _physics_effective_link_values(settings: GOHToolSettings, role: str) -> tuple[float, int, float, float, float, float]:
+    default_weight, default_frequency, default_damping, default_rotation = _physics_role_defaults(role)
+    weight = float(settings.physics_link_weight)
+    if abs(weight - 1.0) <= 1e-6 and abs(settings.physics_link_frequency) <= 1e-6 and abs(settings.physics_link_damping) <= 1e-6:
+        weight = default_weight
+    delay = int(settings.physics_link_delay)
+    if delay == 2:
+        delay = _physics_role_delay_default(role)
+    frequency = float(settings.physics_link_frequency) if settings.physics_link_frequency > 0.0 else default_frequency
+    damping = float(settings.physics_link_damping) if settings.physics_link_damping > 0.0 else default_damping
+    jitter = float(settings.physics_link_jitter) if settings.physics_link_jitter > 0.0 else _physics_role_jitter_default(role)
+    rotation = float(settings.physics_link_rotation) if settings.physics_link_rotation > 0.0 else default_rotation
+    return (weight, delay, frequency, damping, jitter, rotation)
+
+
+def _damped_response(normalized_time: float, frequency: float, damping: float) -> float:
+    if normalized_time <= 0.0:
+        return 0.0
+    envelope = math.exp(-max(0.0, damping) * normalized_time * 4.0)
+    return math.sin(2.0 * math.pi * max(0.05, frequency) * normalized_time) * envelope
+
+
+def _smoothstep5(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
+def _underdamped_impulse(t: float, frequency: float, damping_ratio: float, phase: float = 0.0) -> float:
+    t = max(0.0, min(1.0, t))
+    omega = 2.0 * math.pi * max(0.05, frequency)
+    zeta = max(0.02, min(0.96, damping_ratio))
+    omega_d = omega * math.sqrt(max(0.001, 1.0 - zeta * zeta))
+    return math.exp(-zeta * omega * t) * math.sin(omega_d * t + phase)
+
+
+def _critically_damped_kick(t: float, stiffness: float = 8.0) -> float:
+    t = max(0.0, min(1.0, t))
+    k = max(0.1, stiffness)
+    return k * t * math.exp(1.0 - k * t)
+
+
+def _modal_response(t: float, modes: Iterable[tuple[float, float, float, float]]) -> float:
+    return sum(
+        amplitude * _underdamped_impulse(t, frequency, damping, phase)
+        for amplitude, frequency, damping, phase in modes
+    )
+
+
+def _pendulum_swing(t: float, frequency: float, damping_ratio: float, phase: float = 0.0, attack: float = 6.0) -> float:
+    attack_curve = _smoothstep5(min(1.0, max(0.0, t) * max(0.5, attack)))
+    return attack_curve * _underdamped_impulse(t, frequency, damping_ratio, phase)
+
+
+def _fade_role_motion(
+    normalized_time: float,
+    values: tuple[float, float, float, float, float],
+    *,
+    fade_start: float = 0.84,
+) -> tuple[float, float, float, float, float]:
+    fade_start = max(0.05, min(0.98, fade_start))
+    fade = 1.0 - _smoothstep5((normalized_time - fade_start) / (1.0 - fade_start))
+    longitudinal, side, vertical, rotation, jitter_scale = values
+    return (
+        longitudinal * fade,
+        side * fade,
+        vertical * fade,
+        rotation * fade,
+        jitter_scale,
+    )
+
+
+def _physics_role_motion(role: str, normalized_time: float, frequency: float, damping: float) -> tuple[float, float, float, float, float]:
+    if normalized_time <= 0.0:
+        return (0.0, 0.0, 0.0, 0.0, 1.0)
+    t = max(0.0, min(1.0, normalized_time))
+    freq = max(0.05, frequency)
+    damp = max(0.0, damping)
+    damping_ratio = max(0.05, min(0.86, damp))
+    kick = _critically_damped_kick(t, 10.0)
+    soft_kick = _critically_damped_kick(t, 5.8)
+    if role == "BODY_SPRING":
+        hull_swing = _pendulum_swing(t, freq * 0.72, damping_ratio + 0.02, 0.08, 5.0)
+        pitch_swing = _pendulum_swing(t, freq * 0.84, damping_ratio + 0.03, 0.0, 5.2)
+        counter_swing = _pendulum_swing(t, freq * 1.36, damping_ratio + 0.08, 0.45, 7.0)
+        side_swing = _pendulum_swing(t, freq * 0.58, damping_ratio + 0.05, 0.55, 4.5)
+        side_chatter = _pendulum_swing(t, freq * 1.62, damping_ratio + 0.12, 0.0, 7.5)
+        longitudinal = 0.70 * kick + 0.72 * hull_swing - 0.18 * counter_swing
+        side = 0.28 * side_swing + 0.09 * side_chatter
+        vertical = -0.22 * soft_kick + 0.24 * _pendulum_swing(t, freq * 1.05, damping_ratio + 0.08, 0.25, 5.5)
+        rotation = 0.35 * kick + 1.18 * pitch_swing + 0.42 * counter_swing
+        return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.30), fade_start=0.94)
+    if role == "ANTENNA_WHIP":
+        lag = _smoothstep5(min(1.0, t * 1.35))
+        whip = lag * _modal_response(t, ((1.42, freq, damping_ratio, 0.72), (0.46, freq * 1.85, damping_ratio + 0.05, 0.0)))
+        longitudinal = whip * 0.18
+        side = lag * _modal_response(t, ((0.22, freq * 0.75, damping_ratio + 0.08, 1.2),))
+        vertical = lag * _modal_response(t, ((0.14, freq * 0.55, damping_ratio + 0.10, 0.0),))
+        rotation = whip * 1.48
+        return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.18))
+    if role == "ACCESSORY_JITTER":
+        rattle = _underdamped_impulse(t, freq, damping_ratio, 0.0)
+        buzz = _underdamped_impulse(t, freq * 2.37, damping_ratio + 0.10, 0.6)
+        longitudinal = 0.22 * rattle + 0.10 * buzz
+        side = 0.30 * buzz
+        vertical = 0.18 * _underdamped_impulse(t, freq * 1.41, damping_ratio + 0.07, 1.1)
+        rotation = 0.60 * rattle + 0.42 * buzz
+        return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.48))
+    if role == "SUSPENSION_BOUNCE":
+        compression = -0.54 * _critically_damped_kick(t, 6.0)
+        bounce = _pendulum_swing(t, freq * 0.82, damping_ratio + 0.02, 0.18, 4.4)
+        rebound = _pendulum_swing(t, freq * 1.42, damping_ratio + 0.10, 0.0, 6.5)
+        longitudinal = 0.12 * bounce + 0.04 * rebound
+        side = 0.10 * _pendulum_swing(t, freq * 0.50, damping_ratio + 0.06, 0.9, 4.0)
+        vertical = compression + 0.72 * bounce + 0.18 * rebound
+        rotation = 0.92 * _pendulum_swing(t, freq * 0.70, damping_ratio + 0.03, 0.25, 4.8) + 0.26 * rebound
+        return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.22), fade_start=0.93)
+    if role == "TRACK_RUMBLE":
+        rumble = _underdamped_impulse(t, freq, damping_ratio + 0.06, 0.0)
+        chatter = _underdamped_impulse(t, freq * 2.9, damping_ratio + 0.14, 0.4)
+        longitudinal = 0.14 * rumble + 0.07 * chatter
+        side = 0.18 * chatter
+        vertical = 0.16 * abs(rumble) + 0.07 * chatter
+        rotation = 0.38 * chatter
+        return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.42))
+    follow = _smoothstep5(min(1.0, t * 1.5)) * math.exp(-damp * t * 3.2)
+    spring = _underdamped_impulse(t, freq, damping_ratio + 0.08, 0.0) * 0.24
+    return _fade_role_motion(t, (0.48 * follow + spring, 0.05 * spring, 0.03 * spring, 0.55 * spring, 0.16))
+
+
+def _deterministic_jitter(obj: bpy.types.Object, frame: int) -> float:
+    seed = sum(ord(char) for char in obj.name) % 997
+    return (
+        math.sin(frame * 1.618 + seed * 0.031)
+        + math.sin(frame * 2.414 + seed * 0.017) * 0.5
+    ) / 1.5
+
+
+def _object_local_offset_from_world(obj: bpy.types.Object, world_offset: Vector) -> Vector:
+    if obj.parent is None:
+        return world_offset.copy()
+    return obj.parent.matrix_world.inverted_safe().to_3x3() @ world_offset
+
+
+def _physics_axis_world(obj: bpy.types.Object, axis_key: str) -> Vector:
+    axis = obj.matrix_world.to_3x3() @ _local_axis_vector(axis_key)
+    if axis.length <= EPSILON:
+        axis = _local_axis_vector(axis_key)
+    axis.normalize()
+    return axis
+
+
+def _physics_side_axis(obj: bpy.types.Object, source_axis: Vector) -> Vector:
+    local_axis = obj.matrix_world.to_3x3().inverted_safe() @ source_axis
+    if local_axis.length <= EPSILON:
+        local_axis = Vector((0.0, -1.0, 0.0))
+    local_axis.normalize()
+    side_axis = local_axis.cross(Vector((0.0, 0.0, 1.0)))
+    if side_axis.length <= EPSILON:
+        side_axis = Vector((1.0, 0.0, 0.0))
+    side_axis.normalize()
+    return side_axis
+
+
+def _physics_direction_specs(direction_set: str, prefix: str) -> tuple[tuple[str, str], ...]:
+    safe_prefix = sanitized_file_stem(prefix or "fire") or "fire"
+    if direction_set == "SIX_LOCAL":
+        return (
+            (f"{safe_prefix}_right", "X"),
+            (f"{safe_prefix}_left", "NEG_X"),
+            (f"{safe_prefix}_back", "Y"),
+            (f"{safe_prefix}_front", "NEG_Y"),
+            (f"{safe_prefix}_up", "Z"),
+            (f"{safe_prefix}_down", "NEG_Z"),
+        )
+    return (
+        (f"{safe_prefix}_front", "NEG_Y"),
+        (f"{safe_prefix}_back", "Y"),
+        (f"{safe_prefix}_left", "NEG_X"),
+        (f"{safe_prefix}_right", "X"),
+    )
+
+
+def _physics_linked_objects(
+    context: bpy.types.Context,
+    source: bpy.types.Object,
+    include_scene_links: bool,
+) -> list[bpy.types.Object]:
+    linked = [obj for obj in context.selected_objects if obj != source]
+    if include_scene_links:
+        for obj in context.scene.objects:
+            if obj == source or obj in linked:
+                continue
+            if _physics_source_matches(obj, source):
+                linked.append(obj)
+    return linked
+
+
+def _is_goh_physics_action(action: bpy.types.Action | None) -> bool:
+    if action is None:
+        return False
+    return any(action.name.startswith(prefix) for prefix in GOH_PHYSICS_ACTION_PREFIXES)
+
+
+def _physics_mark_sequence(owner, sequence_name: str | None, file_stem: str | None = None) -> None:
+    if owner is None or not sequence_name:
+        return
+    owner["goh_sequence_name"] = sequence_name
+    owner["goh_sequence_file"] = file_stem or sequence_name
+
+
+def _physics_custom_text(owner, key: str) -> str | None:
+    if owner is None:
+        return None
+    try:
+        value = owner.get(key)
+    except (AttributeError, TypeError):
+        return None
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _physics_sequence_names(default_name: str, *sources) -> tuple[str, str]:
+    entries: list[tuple[str | None, str | None]] = []
+    for source in sources:
+        sequence_name = _physics_custom_text(source, "goh_sequence_name")
+        file_stem = _physics_custom_text(source, "goh_sequence_file")
+        if sequence_name or file_stem:
+            entries.append((sequence_name, file_stem))
+
+    preferred = next(
+        (entry for entry in entries if entry[0] and entry[0] != default_name),
+        entries[0] if entries else (None, None),
+    )
+    sequence_name, file_stem = preferred
+    if not sequence_name and file_stem:
+        sequence_name = sanitized_file_stem(Path(file_stem).stem)
+    sequence_name = sequence_name or default_name
+    file_stem = file_stem or sequence_name
+    return sequence_name, file_stem
+
+
+def _physics_push_action_to_nla(
+    obj: bpy.types.Object,
+    action: bpy.types.Action,
+    sequence_name: str,
+    start: int,
+    end: int,
+) -> None:
+    animation_data = obj.animation_data_create()
+    track = animation_data.nla_tracks.new()
+    track.name = f"{GOH_PHYSICS_NLA_PREFIX} {sequence_name}"
+    strip = track.strips.new(sequence_name, start, action)
+    strip.name = sequence_name
+    strip.frame_start = start
+    strip.frame_end = max(start + 1, end)
+    try:
+        _physics_mark_sequence(strip, sequence_name)
+    except TypeError:
+        pass
+    animation_data.use_nla = True
+
+
+def _physics_prepare_action(
+    obj: bpy.types.Object,
+    action_prefix: str,
+    sequence_name: str | None,
+    file_stem: str | None,
+) -> bpy.types.Action:
+    obj.animation_data_create()
+    action = bpy.data.actions.new(_physics_action_name(action_prefix, obj))
+    if sequence_name:
+        _physics_mark_sequence(action, sequence_name, file_stem)
+    obj.animation_data.action = action
+    return action
+
+
+def _action_fcurves(action: bpy.types.Action) -> list[bpy.types.FCurve]:
+    legacy_fcurves = getattr(action, "fcurves", None)
+    if legacy_fcurves is not None:
+        return list(legacy_fcurves)
+    fcurves: list[bpy.types.FCurve] = []
+    for layer in getattr(action, "layers", []):
+        for strip in getattr(layer, "strips", []):
+            for channelbag in getattr(strip, "channelbags", []):
+                fcurves.extend(list(getattr(channelbag, "fcurves", [])))
+    return fcurves
+
+
+def _set_action_interpolation(action: bpy.types.Action, interpolation: str) -> None:
+    for fcurve in _action_fcurves(action):
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = interpolation
+
+
+def _physics_bake_source_recoil(
+    source: bpy.types.Object,
+    axis: Vector,
+    distance: float,
+    start: int,
+    peak: int,
+    settle: int,
+    end: int,
+    *,
+    action_prefix: str = "goh_recoil_source",
+    sequence_name: str | None = None,
+    file_stem: str | None = None,
+    write_object_sequence: bool = False,
+    create_nla: bool = False,
+    clip_end: int | None = None,
+) -> bpy.types.Action:
+    original_location = source.location.copy()
+    action = _physics_prepare_action(source, action_prefix, sequence_name, file_stem)
+    action_end = max(end, int(clip_end if clip_end is not None else end))
+    keyframes = [
+        (start, original_location),
+        (peak, original_location + _object_local_offset_from_world(source, axis * distance)),
+        (settle, original_location - _object_local_offset_from_world(source, axis * distance * 0.18)),
+        (end, original_location),
+    ]
+    if action_end > end:
+        keyframes.append((action_end, original_location))
+    for frame, location in keyframes:
+        source.location = location
+        source.keyframe_insert(data_path="location", frame=frame)
+    _set_action_interpolation(action, "LINEAR")
+    source.location = original_location
+    if write_object_sequence:
+        _physics_mark_sequence(source, sequence_name or "recoil", file_stem or sequence_name or "recoil")
+    if create_nla and sequence_name:
+        _physics_push_action_to_nla(source, action, sequence_name, start, action_end)
+    return action
+
+
+def _physics_bake_linked_response(
+    obj: bpy.types.Object,
+    source_axis: Vector,
+    distance: float,
+    start: int,
+    end: int,
+    settings: GOHToolSettings,
+    *,
+    action_prefix: str = "goh_linked_recoil",
+    sequence_name: str | None = None,
+    file_stem: str | None = None,
+    create_nla: bool = False,
+    base_duration: int | None = None,
+) -> bpy.types.Action | None:
+    role = _physics_role_from_object(obj, settings)
+    if role == "SOURCE":
+        return None
+    default_weight, default_delay, default_frequency, default_damping, default_jitter, default_rotation = _physics_effective_link_values(settings, role)
+    power = max(0.0, float(getattr(settings, "physics_power", 1.0)))
+    weight = float(obj.get("goh_physics_weight", default_weight)) * power
+    delay = int(obj.get("goh_physics_delay", default_delay))
+    frequency = float(obj.get("goh_physics_frequency", default_frequency))
+    damping = float(obj.get("goh_physics_damping", default_damping))
+    jitter = float(obj.get("goh_physics_jitter", default_jitter)) * power
+    rotation_degrees = float(obj.get("goh_physics_rotation", default_rotation)) * max(0.15, power ** 0.65)
+    original_location = obj.location.copy()
+    original_rotation = obj.rotation_euler.copy()
+    side_axis = _physics_side_axis(obj, source_axis)
+    world_side_axis = obj.matrix_world.to_3x3() @ side_axis
+    if world_side_axis.length <= EPSILON:
+        world_side_axis = side_axis.copy()
+    world_side_axis.normalize()
+    world_up_axis = obj.matrix_world.to_3x3() @ Vector((0.0, 0.0, 1.0))
+    if world_up_axis.length <= EPSILON:
+        world_up_axis = Vector((0.0, 0.0, 1.0))
+    world_up_axis.normalize()
+
+    action = _physics_prepare_action(obj, action_prefix, sequence_name, file_stem)
+    base_frames = max(1, int(base_duration if base_duration is not None else end - start))
+    duration = _physics_role_duration_frames(settings, role, base_frames)
+    for frame in range(start, end + 1):
+        local_frame = frame - start - delay
+        normalized = 0.0 if local_frame <= 0 else max(0.0, min(1.0, local_frame / duration))
+        longitudinal, side, vertical, rotation_response, jitter_scale = _physics_role_motion(role, normalized, frequency, damping)
+        jitter_value = 0.0 if local_frame <= 0 else _deterministic_jitter(obj, frame) * jitter * max(0.0, 1.0 - normalized)
+        offset = source_axis * (distance * weight * longitudinal)
+        offset += world_side_axis * (distance * weight * side)
+        offset += world_up_axis * (distance * weight * vertical)
+        offset += world_side_axis * (distance * jitter_value * jitter_scale)
+        offset += world_up_axis * (distance * jitter_value * jitter_scale * 0.45)
+        obj.location = original_location + _object_local_offset_from_world(obj, offset)
+        rotation_offset = math.radians(rotation_degrees) * weight * (rotation_response + jitter_value * jitter_scale)
+        obj.rotation_euler = original_rotation.copy()
+        obj.rotation_euler.rotate_axis("X", rotation_offset * float(side_axis.x))
+        obj.rotation_euler.rotate_axis("Y", rotation_offset * float(side_axis.y))
+        obj.rotation_euler.rotate_axis("Z", rotation_offset * float(side_axis.z))
+        obj.keyframe_insert(data_path="location", frame=frame)
+        obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+    _set_action_interpolation(action, "LINEAR")
+    obj.location = original_location
+    obj.rotation_euler = original_rotation
+    if create_nla and sequence_name:
+        _physics_push_action_to_nla(obj, action, sequence_name, start, end)
+    return action
+
+
+def _damped_impact_response(normalized_time: float, frequency: float, damping: float) -> float:
+    fade = 1.0 - _smoothstep5((normalized_time - 0.84) / 0.16)
+    envelope = math.exp(-max(0.0, damping) * normalized_time * 4.0)
+    return math.cos(2.0 * math.pi * max(0.05, frequency) * normalized_time) * envelope * fade
+
+
+def _physics_bake_impact_response(
+    obj: bpy.types.Object,
+    axis: Vector,
+    distance: float,
+    start: int,
+    end: int,
+    settings: GOHToolSettings,
+    *,
+    sequence_name: str,
+    create_nla: bool = False,
+    base_duration: int | None = None,
+) -> bpy.types.Action:
+    role = _physics_role_from_object(obj, settings)
+    default_weight, _default_delay, default_frequency, default_damping, default_jitter, default_rotation = _physics_effective_link_values(settings, role)
+    power = max(0.0, float(getattr(settings, "physics_power", 1.0)))
+    weight = float(obj.get("goh_physics_weight", default_weight)) * power
+    frequency = float(obj.get("goh_physics_frequency", default_frequency))
+    damping = float(obj.get("goh_physics_damping", default_damping))
+    jitter = float(obj.get("goh_physics_jitter", default_jitter)) * power
+    rotation_degrees = float(obj.get("goh_physics_rotation", default_rotation)) * max(0.15, power ** 0.65)
+    original_location = obj.location.copy()
+    original_rotation = obj.rotation_euler.copy()
+    side_axis = _physics_side_axis(obj, axis)
+    world_side_axis = obj.matrix_world.to_3x3() @ side_axis
+    if world_side_axis.length <= EPSILON:
+        world_side_axis = side_axis.copy()
+    world_side_axis.normalize()
+    world_up_axis = obj.matrix_world.to_3x3() @ Vector((0.0, 0.0, 1.0))
+    if world_up_axis.length <= EPSILON:
+        world_up_axis = Vector((0.0, 0.0, 1.0))
+    world_up_axis.normalize()
+    action = _physics_prepare_action(obj, "goh_impact", sequence_name, sequence_name)
+    base_frames = max(1, int(base_duration if base_duration is not None else end - start - 1))
+    duration = _physics_role_duration_frames(settings, role, base_frames)
+    for frame in range(start, end + 1):
+        if frame == start:
+            response = 0.0
+            normalized = 0.0
+        else:
+            normalized = max(0.0, min(1.0, (frame - start - 1) / duration))
+            response = _damped_impact_response(normalized, frequency, damping)
+        longitudinal, side, vertical, rotation_response, jitter_scale = _physics_role_motion(role, normalized, frequency, damping)
+        jitter_value = _deterministic_jitter(obj, frame) * jitter * max(0.0, 1.0 - normalized)
+        offset = axis * (distance * weight * (0.42 * response + 0.30 * longitudinal))
+        offset += world_side_axis * (distance * weight * side + distance * jitter_value * jitter_scale)
+        offset += world_up_axis * (distance * weight * vertical + distance * jitter_value * jitter_scale * 0.35)
+        obj.location = original_location + _object_local_offset_from_world(obj, offset)
+        rotation_offset = math.radians(rotation_degrees) * weight * (0.55 * response + rotation_response + jitter_value * jitter_scale)
+        obj.rotation_euler = original_rotation.copy()
+        obj.rotation_euler.rotate_axis("X", rotation_offset * float(side_axis.x))
+        obj.rotation_euler.rotate_axis("Y", rotation_offset * float(side_axis.y))
+        obj.rotation_euler.rotate_axis("Z", rotation_offset * float(side_axis.z))
+        obj.keyframe_insert(data_path="location", frame=frame)
+        obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+    _set_action_interpolation(action, "LINEAR")
+    obj.location = original_location
+    obj.rotation_euler = original_rotation
+    if create_nla:
+        _physics_push_action_to_nla(obj, action, sequence_name, start, end)
+    return action
+
+
+def _physics_create_armor_ripple(
+    obj: bpy.types.Object,
+    center_world: Vector,
+    axis_world: Vector,
+    start: int,
+    end: int,
+    settings: GOHToolSettings,
+    *,
+    sequence_name: str,
+    create_nla: bool = False,
+) -> bool:
+    if obj.type != "MESH" or obj.data is None or not obj.data.vertices:
+        return False
+    if obj.data.shape_keys is None:
+        obj.shape_key_add(name="Basis", from_mix=False)
+    shape_keys = obj.data.shape_keys
+    if shape_keys is None:
+        return False
+
+    prefix = f"GOH_Ripple_{sanitized_file_stem(sequence_name)}_"
+    for key_block in list(shape_keys.key_blocks):
+        if key_block.name.startswith(prefix):
+            obj.shape_key_remove(key_block)
+
+    mesh = obj.data
+    mesh.update()
+    center_local = obj.matrix_world.inverted_safe() @ center_world
+    axis_local = obj.matrix_world.to_3x3().inverted_safe() @ axis_world
+    if axis_local.length <= EPSILON:
+        axis_local = Vector((0.0, 0.0, 1.0))
+    axis_local.normalize()
+    radius = max(0.01, float(settings.physics_ripple_radius))
+    amplitude = float(settings.physics_ripple_amplitude) * max(0.0, float(getattr(settings, "physics_power", 1.0)))
+    waves = max(1, int(settings.physics_ripple_waves))
+    duration = max(1, end - start)
+    ripple_keys: list[tuple[int, bpy.types.ShapeKey]] = []
+
+    for frame in range(start, end + 1):
+        normalized = max(0.0, min(1.0, (frame - start) / duration))
+        key_block = obj.shape_key_add(name=f"{prefix}{frame:04d}", from_mix=False)
+        for vertex in mesh.vertices:
+            base = vertex.co
+            rel = base - center_local
+            distance = rel.length
+            spatial = math.exp(-distance / radius * 2.5)
+            temporal = math.exp(-normalized * 3.25)
+            phase = (distance / radius * waves * math.pi * 2.0) - normalized * math.pi * 2.0
+            wave = math.sin(phase) * spatial * temporal
+            dent = math.exp(-distance / radius * 3.5) * max(0.0, 1.0 - normalized) * 0.35
+            normal = vertex.normal.copy()
+            if normal.length <= EPSILON:
+                normal = axis_local.copy()
+            normal.normalize()
+            direction = normal * 0.78 + axis_local * 0.22
+            if direction.length <= EPSILON:
+                direction = normal
+            direction.normalize()
+            key_block.data[vertex.index].co = base + direction * amplitude * (wave - dent)
+        ripple_keys.append((frame, key_block))
+
+    shape_keys.animation_data_create()
+    action = bpy.data.actions.new(name=f"goh_armor_ripple_{sanitized_file_stem(obj.name)}")
+    _physics_mark_sequence(action, sequence_name, sequence_name)
+    shape_keys.animation_data.action = action
+    for _frame, key_block in ripple_keys:
+        key_block.value = 0.0
+    for current_frame, current_key in ripple_keys:
+        for _frame, key_block in ripple_keys:
+            key_block.value = 1.0 if key_block == current_key else 0.0
+            key_block.keyframe_insert(data_path="value", frame=current_frame)
+    for fcurve in _action_fcurves(action):
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = "CONSTANT"
+    for _frame, key_block in ripple_keys:
+        key_block.value = 0.0
+    obj["goh_force_mesh_animation"] = True
+    if create_nla:
+        _physics_push_action_to_nla(shape_keys, action, sequence_name, start, end)
+    return True
+
+
+def _physics_clear_object(obj: bpy.types.Object, clear_actions: bool) -> bool:
+    changed = False
+    for key in GOH_PHYSICS_PROP_KEYS:
+        if key in obj:
+            del obj[key]
+            changed = True
+    if not clear_actions:
+        return changed
+    animation_data = getattr(obj, "animation_data", None)
+    if animation_data is None:
+        return changed
+    if _is_goh_physics_action(animation_data.action):
+        animation_data.action = None
+        changed = True
+    for track in list(animation_data.nla_tracks):
+        if track.name.startswith(GOH_PHYSICS_NLA_PREFIX) or any(_is_goh_physics_action(strip.action) for strip in track.strips):
+            animation_data.nla_tracks.remove(track)
+            changed = True
+    return changed
 
 
 def _basis_entity_type_value(settings: GOHBasisSettings) -> str:
@@ -1004,7 +2108,10 @@ class GOHBlenderExporter:
             for obj in self.context.selected_objects:
                 scope.update(self._iter_descendants(obj))
         else:
-            scope = set(self.context.collection.all_objects)
+            scope = set(self.context.scene.objects)
+
+        exportable_types = {"MESH", "EMPTY", "ARMATURE"}
+        scope = {obj for obj in scope if obj.type in exportable_types}
 
         if not self.operator.include_hidden:
             scope = {obj for obj in scope if not self._is_hidden(obj)}
@@ -1041,7 +2148,7 @@ class GOHBlenderExporter:
         for root in roots:
             child_node = self._build_object_node(
                 obj=root,
-                parent_matrix=Matrix.Identity(4),
+                parent_matrix=self._root_parent_matrix_for_object(root, visual_objects),
                 visual_scope=visual_objects,
                 attachments=attachments,
                 bone_name_map=bone_name_map,
@@ -1137,7 +2244,7 @@ class GOHBlenderExporter:
         if not clip_specs:
             return
 
-        bone_names = self._animation_bone_names(bundle.model.basis)
+        bone_names = self._animation_export_bone_names(bundle.model.basis)
         if not bone_names:
             return
 
@@ -1440,6 +2547,14 @@ class GOHBlenderExporter:
         walk(basis)
         return names
 
+    def _animation_export_bone_names(self, basis: BoneNode) -> list[str]:
+        names = self._animation_bone_names(basis)
+        if self.armature_obj is None:
+            # Official object-mode ANM clips leave the static GOH basis/root
+            # transform in the MDL and only key the driven child bones.
+            names = [name for name in names if name != self.basis_name]
+        return names
+
     def _sample_animation_frames(
         self,
         visual_objects: set[bpy.types.Object],
@@ -1492,7 +2607,10 @@ class GOHBlenderExporter:
                 blob, stride = encode_mesh_vertex_stream(animated_mesh, materials)
                 if stride != base_stride or len(animated_mesh.vertices) != len(base_mesh.vertices):
                     raise ExportError(
-                        f'Mesh animation on "{bone_name}" changes vertex layout. GOH mesh animation requires a stable vertex count and stride.'
+                        f'Mesh animation on "{bone_name}" changes vertex layout. '
+                        f"Base has {len(base_mesh.vertices)} vertices/stride {base_stride}; "
+                        f"frame {frame} has {len(animated_mesh.vertices)} vertices/stride {stride}. "
+                        "GOH mesh animation requires a stable vertex count and stride."
                     )
                 frame_states[bone_name] = MeshAnimationState(
                     first_vertex=0,
@@ -1547,12 +2665,7 @@ class GOHBlenderExporter:
         object_map: dict[str, bpy.types.Object],
         visual_objects: set[bpy.types.Object],
     ) -> dict[str, AnimationState]:
-        frame_state: dict[str, AnimationState] = {
-            self.basis_name: AnimationState(
-                matrix=self._matrix_rows(Vector((0.0, 0.0, 0.0)), Matrix.Identity(3)),
-                visible=1,
-            )
-        }
+        frame_state: dict[str, AnimationState] = {}
         for bone_name in bone_names:
             if bone_name == self.basis_name:
                 continue
@@ -1561,6 +2674,8 @@ class GOHBlenderExporter:
                 raise ExportError(f'Animation export could not find object for GOH bone "{bone_name}".')
             parent_matrix = Matrix.Identity(4)
             if obj.parent in visual_objects and not self._is_volume_object(obj.parent):
+                parent_matrix = obj.parent.matrix_world
+            elif obj.parent is not None and self._is_basis_helper_object(obj.parent):
                 parent_matrix = obj.parent.matrix_world
             local_matrix = parent_matrix.inverted_safe() @ obj.matrix_world
             loc, rot, _scale = local_matrix.decompose()
@@ -1593,6 +2708,56 @@ class GOHBlenderExporter:
     def _any_custom_bool(self, sources: Iterable[object], key: str) -> bool:
         return any(self._custom_bool(source, key) for source in sources)
 
+    def _root_parent_matrix_for_object(
+        self,
+        obj: bpy.types.Object,
+        visual_scope: set[bpy.types.Object],
+    ) -> Matrix:
+        parent = obj.parent
+        if parent is not None and parent not in visual_scope and self._is_basis_helper_object(parent):
+            return self._export_world_matrix(parent)
+        return Matrix.Identity(4)
+
+    def _export_world_matrix(self, obj: bpy.types.Object | None) -> Matrix:
+        if obj is None:
+            return Matrix.Identity(4)
+        cached = self._stored_rest_local_matrix(obj)
+        if cached is not None:
+            parent_matrix = self._export_world_matrix(obj.parent)
+            return parent_matrix @ cached
+        return obj.matrix_world.copy()
+
+    def _stored_rest_local_matrix(self, obj: bpy.types.Object | None) -> Matrix | None:
+        if obj is None:
+            return None
+        values = obj.get("goh_rest_matrix_local")
+        if values is None:
+            return None
+        try:
+            floats = [float(value) for value in values]
+        except (TypeError, ValueError):
+            return None
+        if len(floats) != 16:
+            return None
+        return Matrix(
+            (
+                floats[0:4],
+                floats[4:8],
+                floats[8:12],
+                floats[12:16],
+            )
+        )
+
+    def _reference_matrix_for_object_bone(
+        self,
+        bone_name: str,
+        bone_name_map: dict[bpy.types.Object, str],
+    ) -> Matrix | None:
+        for obj, mapped_name in bone_name_map.items():
+            if mapped_name == bone_name:
+                return self._export_world_matrix(obj)
+        return None
+
     def _build_object_node(
         self,
         obj: bpy.types.Object,
@@ -1601,7 +2766,8 @@ class GOHBlenderExporter:
         attachments: dict[str, list[AttachmentObject]],
         bone_name_map: dict[bpy.types.Object, str],
     ) -> BoneNode:
-        local_matrix = parent_matrix.inverted() @ obj.matrix_world
+        obj_world_matrix = self._export_world_matrix(obj)
+        local_matrix = parent_matrix.inverted() @ obj_world_matrix
         node_matrix = self._node_matrix_for_object(obj, local_matrix, visual_scope)
         mesh_matrix = node_matrix.inverted() @ local_matrix
 
@@ -1652,7 +2818,7 @@ class GOHBlenderExporter:
             node.children.append(
                 self._build_object_node(
                     obj=child,
-                    parent_matrix=obj.matrix_world,
+                    parent_matrix=obj_world_matrix,
                     visual_scope=visual_scope,
                     attachments=attachments,
                     bone_name_map=bone_name_map,
@@ -1778,6 +2944,15 @@ class GOHBlenderExporter:
             bone_index_map = {}
             max_influences = 0
 
+        preserve_loop_vertices = False
+        for attachment in attachments:
+            obj = attachment.obj
+            shape_keys = getattr(obj.data, "shape_keys", None)
+            animation_data = getattr(shape_keys, "animation_data", None) if shape_keys else None
+            if self._custom_bool(obj, "goh_force_mesh_animation") or (shape_keys and len(shape_keys.key_blocks) > 1 and animation_data is not None):
+                preserve_loop_vertices = True
+                break
+
         vertex_lookup: dict[tuple, int] = {}
         vertices: list[MeshVertex] = []
         mesh_sections: list[MeshSection] = []
@@ -1794,12 +2969,16 @@ class GOHBlenderExporter:
                         bone_index_map=bone_index_map,
                         max_influences=max_influences,
                     )
-                    key = self._mesh_vertex_key(final_vertex)
-                    index = vertex_lookup.get(key)
-                    if index is None:
+                    if preserve_loop_vertices:
                         index = len(vertices)
-                        vertex_lookup[key] = index
                         vertices.append(final_vertex)
+                    else:
+                        key = self._mesh_vertex_key(final_vertex)
+                        index = vertex_lookup.get(key)
+                        if index is None:
+                            index = len(vertices)
+                            vertex_lookup[key] = index
+                            vertices.append(final_vertex)
                     tri_indices.append(index)
                 section.triangle_indices.append((tri_indices[0], tri_indices[1], tri_indices[2]))
 
@@ -1945,7 +3124,7 @@ class GOHBlenderExporter:
         for obj in sorted(volume_objects, key=lambda item: item.name.lower()):
             volume_name = self._volume_entry_name(obj)
             bone_name, reference_matrix = self._resolve_volume_bone(obj, bone_name_map, visual_scope)
-            local_matrix = reference_matrix.inverted() @ obj.matrix_world
+            local_matrix = reference_matrix.inverted() @ self._export_world_matrix(obj)
             volume_kind = self._volume_kind(obj)
             common_kwargs = dict(
                 entry_name=volume_name,
@@ -2463,6 +3642,9 @@ class GOHBlenderExporter:
     ) -> tuple[str, Matrix]:
         custom_bone = self._custom_text(obj, "goh_volume_bone")
         if custom_bone:
+            object_reference = self._reference_matrix_for_object_bone(custom_bone, bone_name_map)
+            if object_reference is not None:
+                return custom_bone, object_reference
             return custom_bone, self._reference_matrix_for_bone(custom_bone)
 
         if self.armature_obj and obj.parent == self.armature_obj and obj.parent_type == "BONE" and obj.parent_bone:
@@ -2470,11 +3652,14 @@ class GOHBlenderExporter:
 
         if obj.parent in bone_name_map:
             bone_name = bone_name_map[obj.parent]
-            reference_matrix = obj.parent.matrix_world
+            reference_matrix = self._export_world_matrix(obj.parent)
             return bone_name, reference_matrix
 
         derived = self._derive_volume_bone_from_name(obj.name)
         if derived:
+            object_reference = self._reference_matrix_for_object_bone(derived, bone_name_map)
+            if object_reference is not None:
+                return derived, object_reference
             return derived, self._reference_matrix_for_bone(derived)
 
         return self.basis_name, self._reference_matrix_for_bone(self.basis_name)
@@ -2558,14 +3743,19 @@ class GOHBlenderExporter:
                 return
             values.setdefault(key, []).append(text)
 
+        owner_keys = []
         if hasattr(owner, "keys"):
-            for raw_key in owner.keys():
-                if raw_key == "goh_legacy_props":
-                    continue
-                try:
-                    add_value(raw_key, owner.get(raw_key))
-                except Exception:
-                    continue
+            try:
+                owner_keys = list(owner.keys())
+            except Exception:
+                owner_keys = []
+        for raw_key in owner_keys:
+            if raw_key == "goh_legacy_props":
+                continue
+            try:
+                add_value(raw_key, owner.get(raw_key))
+            except Exception:
+                continue
         raw_text = ""
         if hasattr(owner, "get"):
             try:
@@ -2633,6 +3823,9 @@ class GOHBlenderExporter:
     def _basis_parameter_text(self) -> str | None:
         parts: list[str] = []
         if self.basis_helper is not None:
+            explicit = self._custom_text(self.basis_helper, "goh_parameters")
+            if explicit:
+                parts.append(explicit.strip())
             helper_type = self._legacy_first_text(self.basis_helper, "type")
             helper_model = self._legacy_first_text(self.basis_helper, "model")
             helper_radius = self._legacy_first_text(self.basis_helper, "wheelradius")
@@ -2916,10 +4109,18 @@ class GOHBlenderExporter:
             return True
         return any(collection.name == self.volume_collection_name for collection in obj.users_collection)
 
+    def _custom_get(self, owner, key: str):
+        if owner is None or not hasattr(owner, "get"):
+            return None
+        try:
+            return owner.get(key)
+        except (AttributeError, TypeError, RuntimeError):
+            return None
+
     def _custom_scalar(self, owner, key: str):
         if owner is None:
             return None
-        value = owner.get(key)
+        value = self._custom_get(owner, key)
         if value is not None:
             return value
         for legacy_key in GOH_LEGACY_INT_FALLBACKS.get(key, ()):
@@ -2931,7 +4132,7 @@ class GOHBlenderExporter:
     def _custom_text(self, owner, key: str) -> str | None:
         if owner is None:
             return None
-        value = owner.get(key)
+        value = self._custom_get(owner, key)
         if value is not None:
             text = str(value).strip()
             if text:
@@ -2972,7 +4173,7 @@ class GOHBlenderExporter:
     def _custom_bool(self, owner, key: str) -> bool:
         if owner is None:
             return False
-        value = bool(owner.get(key))
+        value = bool(self._custom_get(owner, key))
         if value:
             return True
         flag_names = GOH_LEGACY_BOOL_FLAGS.get(key)
@@ -2983,7 +4184,7 @@ class GOHBlenderExporter:
     def _custom_int(self, owner, key: str) -> int | None:
         if owner is None:
             return None
-        value = owner.get(key)
+        value = self._custom_get(owner, key)
         if value is None:
             for legacy_key in GOH_LEGACY_INT_FALLBACKS.get(key, ()):
                 legacy_value = self._legacy_first_float(owner, legacy_key)
@@ -2998,7 +4199,7 @@ class GOHBlenderExporter:
     def _custom_float(self, owner, key: str) -> float | None:
         if owner is None:
             return None
-        value = owner.get(key)
+        value = self._custom_get(owner, key)
         if value is None:
             for legacy_key in GOH_LEGACY_FLOAT_FALLBACKS.get(key, ()):
                 legacy_value = self._legacy_first_float(owner, legacy_key)
@@ -3013,7 +4214,7 @@ class GOHBlenderExporter:
     def _custom_lines(self, owner, key: str) -> list[str]:
         if owner is None:
             return []
-        value = owner.get(key)
+        value = self._custom_get(owner, key)
         if value is None:
             return []
         if isinstance(value, str):
@@ -3026,7 +4227,7 @@ class GOHBlenderExporter:
     def _custom_rgba(self, owner, key: str) -> tuple[int, int, int, int] | None:
         if owner is None:
             return None
-        value = owner.get(key)
+        value = self._custom_get(owner, key)
         if value is None:
             return None
         if isinstance(value, str):
@@ -3084,12 +4285,14 @@ class GOHAnimationImporter:
     def __init__(self, context: bpy.types.Context, operator: "IMPORT_SCENE_OT_goh_anm") -> None:
         self.context = context
         self.operator = operator
-        self.axis_rotation = self._axis_rotation_matrix(operator.axis_mode)
+        self.axis_mode = operator.axis_mode
+        self.axis_rotation = self._axis_rotation_matrix(self.axis_mode)
         self.scale_factor = operator.scale_factor
         self.warnings: list[str] = []
 
     def import_animation(self) -> list[str]:
         animation = read_animation(self.operator.filepath)
+        self._configure_import_space(animation)
         armature = self._target_armature()
         if armature is not None:
             self._apply_to_armature(animation, armature)
@@ -3097,6 +4300,88 @@ class GOHAnimationImporter:
             self._apply_to_objects(animation)
         self._apply_mesh_animation(animation)
         return self.warnings
+
+    def _configure_import_space(self, animation: AnimationFile) -> None:
+        requested_axis = self.operator.axis_mode
+        requested_scale = float(self.operator.scale_factor)
+        if requested_axis == "AUTO":
+            detected = self._detect_imported_model_space(animation)
+            if detected is not None:
+                self.axis_mode, self.scale_factor = detected
+            else:
+                self.axis_mode, self.scale_factor = "GOH_TO_BLENDER", requested_scale
+        else:
+            self.axis_mode, self.scale_factor = requested_axis, requested_scale
+            detected = self._detect_imported_model_space(animation)
+            if detected is not None and detected[0] != requested_axis:
+                self.warnings.append(
+                    f'Animation axis "{requested_axis}" differs from the imported model axis "{detected[0]}". '
+                    'Use Auto / Match Imported Model if the animation appears rotated.'
+                )
+        self.axis_rotation = self._axis_rotation_matrix(self.axis_mode)
+
+    def _detect_imported_model_space(self, animation: AnimationFile) -> tuple[str, float] | None:
+        candidates = self._animation_object_pool(animation)
+        selected_candidates = [obj for obj in candidates if obj.select_get()]
+        pools = (selected_candidates, candidates)
+        for pool in pools:
+            matches: dict[tuple[str, float], int] = {}
+            for obj in pool:
+                axis = self._object_import_axis_mode(obj)
+                if axis is None:
+                    continue
+                scale = self._object_import_scale_factor(obj)
+                key = (axis, round(scale, 6))
+                matches[key] = matches.get(key, 0) + 1
+            if not matches:
+                continue
+            ordered = sorted(matches.items(), key=lambda item: item[1], reverse=True)
+            if len(ordered) > 1:
+                self.warnings.append("Animation targets have mixed imported model axis metadata; using the most common setting.")
+            axis, scale = ordered[0][0]
+            return axis, scale
+        return None
+
+    def _animation_target_names(self, animation: AnimationFile) -> set[str]:
+        names = {name for name in animation.bone_names if name}
+        for frame_state in animation.frames:
+            names.update(name for name in frame_state if name)
+        for frame_state in animation.mesh_frames:
+            names.update(name for name in frame_state if name)
+        return names
+
+    def _animation_object_pool(self, animation: AnimationFile) -> list[bpy.types.Object]:
+        target_names = self._animation_target_names(animation)
+        objects = [obj for obj in self.context.view_layer.objects if obj.type in {"MESH", "EMPTY"}]
+        if not target_names:
+            return objects
+        return [obj for obj in objects if self._object_name_keys(obj) & target_names]
+
+    def _object_name_keys(self, obj: bpy.types.Object) -> set[str]:
+        keys = {obj.name}
+        custom_name = obj.get("goh_bone_name")
+        if custom_name:
+            keys.add(str(custom_name).strip())
+        attach_name = obj.get("goh_attach_bone")
+        if attach_name:
+            keys.add(str(attach_name).strip())
+        if obj.parent_type == "BONE" and obj.parent_bone:
+            keys.add(obj.parent_bone.strip())
+        return {key for key in keys if key}
+
+    def _object_import_axis_mode(self, obj: bpy.types.Object) -> str | None:
+        axis = str(obj.get("goh_import_axis_mode") or "").strip()
+        if axis in {"NONE", "GOH_TO_BLENDER"}:
+            return axis
+        if obj.get("goh_source_mdl") is not None:
+            return "NONE"
+        return None
+
+    def _object_import_scale_factor(self, obj: bpy.types.Object) -> float:
+        try:
+            return float(obj.get("goh_import_scale_factor", self.operator.scale_factor))
+        except (TypeError, ValueError):
+            return float(self.operator.scale_factor)
 
     def _apply_mesh_animation(self, animation: AnimationFile) -> None:
         if not animation.mesh_frames:
@@ -3194,6 +4479,11 @@ class GOHAnimationImporter:
             except RuntimeError:
                 tangent_ready = False
 
+        shape_keys = getattr(obj.data, "shape_keys", None)
+        animation_data = getattr(shape_keys, "animation_data", None) if shape_keys else None
+        preserve_loop_vertices = bool(obj.get("goh_force_mesh_animation")) or (
+            shape_keys is not None and len(shape_keys.key_blocks) > 1 and animation_data is not None
+        )
         vertex_lookup: dict[tuple, int] = {}
         export_to_source: list[int] = []
         try:
@@ -3222,6 +4512,9 @@ class GOHAnimationImporter:
                         round(float(tangent.z), 6),
                         round(tangent_sign, 6),
                     )
+                    if preserve_loop_vertices:
+                        export_to_source.append(loop.vertex_index)
+                        continue
                     if key in vertex_lookup:
                         continue
                     vertex_lookup[key] = len(export_to_source)
@@ -3294,11 +4587,9 @@ class GOHAnimationImporter:
                 shape_key.value = 1.0 if shape_key == current_key else 0.0
                 shape_key.keyframe_insert(data_path="value", frame=frame)
 
-        legacy_fcurves = getattr(action, "fcurves", None)
-        if legacy_fcurves is not None:
-            for fcurve in legacy_fcurves:
-                for keyframe in fcurve.keyframe_points:
-                    keyframe.interpolation = "CONSTANT"
+        for fcurve in _action_fcurves(action):
+            for keyframe in fcurve.keyframe_points:
+                keyframe.interpolation = "CONSTANT"
 
     def _populate_shape_key(
         self,
@@ -3370,13 +4661,20 @@ class GOHAnimationImporter:
 
     def _apply_to_objects(self, animation: AnimationFile) -> None:
         object_map: dict[str, bpy.types.Object] = {}
-        for obj in self.context.view_layer.objects:
-            if obj.type not in {"MESH", "EMPTY"}:
-                continue
-            object_map[obj.name] = obj
+        objects = self._animation_object_pool(animation)
+
+        def put(name: str, obj: bpy.types.Object) -> None:
+            if not name:
+                return
+            previous = object_map.get(name)
+            if previous is None or self._prefer_animation_target(obj, previous):
+                object_map[name] = obj
+
+        for obj in objects:
+            put(obj.name, obj)
             custom_name = obj.get("goh_bone_name")
             if custom_name:
-                object_map[str(custom_name)] = obj
+                put(str(custom_name).strip(), obj)
 
         frame_start = self.operator.frame_start
         for offset, frame_state in enumerate(animation.frames):
@@ -3395,6 +4693,15 @@ class GOHAnimationImporter:
                 obj.keyframe_insert("rotation_quaternion", frame=frame)
                 obj.keyframe_insert("hide_viewport", frame=frame)
                 obj.keyframe_insert("hide_render", frame=frame)
+
+    def _prefer_animation_target(self, obj: bpy.types.Object, previous: bpy.types.Object) -> bool:
+        if obj.select_get() != previous.select_get():
+            return obj.select_get()
+        obj_imported = obj.get("goh_source_mdl") is not None
+        previous_imported = previous.get("goh_source_mdl") is not None
+        if obj_imported != previous_imported:
+            return obj_imported
+        return False
 
     def _decode_matrix_rows(
         self,
@@ -3418,6 +4725,400 @@ class GOHAnimationImporter:
         if axis_mode == "GOH_TO_BLENDER":
             return Matrix.Rotation(-math.pi / 2.0, 4, "Z")
         return Matrix.Identity(4)
+
+
+class GOHModelImporter:
+    def __init__(self, context: bpy.types.Context, operator: "IMPORT_SCENE_OT_goh_model") -> None:
+        self.context = context
+        self.operator = operator
+        self.input_path = Path(operator.filepath)
+        self.input_dir = self.input_path.parent
+        self.axis_rotation = self._axis_rotation_matrix(operator.axis_mode)
+        self.scale_factor = operator.scale_factor
+        self.warnings: list[str] = []
+        self.material_cache: dict[str, bpy.types.Material] = {}
+        self.bone_objects: dict[str, bpy.types.Object] = {}
+        self.imported_objects: list[bpy.types.Object] = []
+        self.root_collection: bpy.types.Collection | None = None
+        self.volume_collection: bpy.types.Collection | None = None
+
+    def import_model(self) -> tuple[int, list[str]]:
+        model = read_model(self.input_path)
+        self.root_collection = self._ensure_child_collection(f"GOH_{self.input_path.stem}", self.context.scene.collection)
+        self.volume_collection = self._ensure_child_collection("GOH_VOLUMES", self.root_collection)
+        self._import_bone_node(model.basis, None)
+        if self.operator.import_volumes:
+            self._import_volumes(model.volumes)
+        for obj in self.imported_objects:
+            obj["goh_source_mdl"] = str(self.input_path)
+            obj["goh_import_axis_mode"] = self.operator.axis_mode
+            obj["goh_import_scale_factor"] = float(self.scale_factor)
+            obj["goh_import_flip_v"] = bool(self.operator.flip_v)
+        return len(self.imported_objects), self.warnings
+
+    def _import_bone_node(self, bone: BoneNode, parent: bpy.types.Object | None) -> bpy.types.Object:
+        local_matrix = self._decode_matrix_rows(bone.matrix or self._identity_matrix_rows())
+        views = list(bone.mesh_views)
+        if not views and bone.volume_view:
+            views = [MeshViewDef(bone.volume_view, bone.volume_flags, bone.layer)]
+        if self.operator.import_lod0_only:
+            views = views[:1]
+
+        primary: bpy.types.Object | None = None
+        for view_index, view in enumerate(views):
+            if not view.file_name:
+                continue
+            mesh_path = self._resolve_asset_path(view.file_name)
+            if mesh_path is None:
+                self.warnings.append(f'Mesh "{view.file_name}" referenced by bone "{bone.name}" was not found.')
+                continue
+            try:
+                mesh_data = read_mesh(mesh_path)
+            except ExportError as exc:
+                self.warnings.append(str(exc))
+                continue
+            object_name = bone.name if primary is None else f"{bone.name}_lod{view_index}"
+            obj = self._create_mesh_object(object_name, mesh_data)
+            obj["goh_bone_name"] = bone.name
+            obj["goh_import_mesh"] = view.file_name
+            if primary is None:
+                self._set_parent_and_matrix(obj, parent, local_matrix)
+                primary = obj
+                self.bone_objects[bone.name] = obj
+            else:
+                self._set_parent_and_matrix(obj, primary, Matrix.Identity(4))
+                obj.hide_viewport = True
+                obj.hide_render = True
+
+        if primary is None:
+            primary = bpy.data.objects.new(bone.name, None)
+            primary.empty_display_type = "PLAIN_AXES"
+            primary.empty_display_size = 0.35
+            primary["goh_bone_name"] = bone.name
+            self._link_object(primary)
+            self._set_parent_and_matrix(primary, parent, local_matrix)
+            self.bone_objects[bone.name] = primary
+
+        if bone.bone_type:
+            primary["goh_bone_type"] = bone.bone_type
+        if bone.limits:
+            primary["goh_limits"] = " ".join(f"{value:g}" for value in bone.limits)
+        if bone.speed is not None:
+            primary["goh_speed2" if bone.speed_uses_speed2 else "goh_speed"] = bone.speed
+        if bone.parameters:
+            primary["goh_parameters"] = bone.parameters
+
+        for child in bone.children:
+            self._import_bone_node(child, primary)
+        return primary
+
+    def _create_mesh_object(self, object_name: str, mesh_data: MeshData) -> bpy.types.Object:
+        vertices = [self._decode_point(vertex.position) for vertex in mesh_data.vertices]
+        faces: list[tuple[int, int, int]] = []
+        face_material_indices: list[int] = []
+        material_files: list[str] = []
+        material_index_by_file: dict[str, int] = {}
+        for section in mesh_data.sections:
+            material_file = section.material_file or f"{mesh_data.file_name}.mtl"
+            if material_file not in material_index_by_file:
+                material_index_by_file[material_file] = len(material_files)
+                material_files.append(material_file)
+            material_index = material_index_by_file[material_file]
+            for triangle in section.triangle_indices:
+                faces.append(triangle)
+                face_material_indices.append(material_index)
+
+        mesh = bpy.data.meshes.new(f"{object_name}_mesh")
+        mesh.from_pydata(vertices, [], faces)
+        mesh.update()
+
+        if mesh_data.vertices and mesh.polygons:
+            uv_layer = mesh.uv_layers.new(name="UVMap")
+            for polygon, triangle in zip(mesh.polygons, faces):
+                for loop_index, vertex_index in zip(polygon.loop_indices, triangle):
+                    if vertex_index >= len(mesh_data.vertices):
+                        continue
+                    u, v = mesh_data.vertices[vertex_index].uv
+                    uv_layer.data[loop_index].uv = (float(u), float(1.0 - v) if self.operator.flip_v else float(v))
+
+        for material_file in material_files:
+            mesh.materials.append(self._material_for_file(material_file))
+        for polygon, material_index in zip(mesh.polygons, face_material_indices):
+            polygon.material_index = material_index
+
+        obj = bpy.data.objects.new(object_name, mesh)
+        obj["goh_import_ply"] = mesh_data.file_name
+        self._link_object(obj)
+        self._apply_vertex_groups(obj, mesh_data)
+        return obj
+
+    def _apply_vertex_groups(self, obj: bpy.types.Object, mesh_data: MeshData) -> None:
+        if not mesh_data.skinned_bones:
+            return
+        groups = [obj.vertex_groups.new(name=name) for name in mesh_data.skinned_bones]
+        for vertex_index, vertex in enumerate(mesh_data.vertices):
+            weights = list(vertex.weights)
+            if len(weights) < 4:
+                weights.append(max(0.0, 1.0 - sum(weights)))
+            for slot, bone_index in enumerate(vertex.bone_indices[:4]):
+                if bone_index >= len(groups):
+                    continue
+                weight = weights[slot] if slot < len(weights) else 0.0
+                if weight > EPSILON:
+                    groups[bone_index].add([vertex_index], weight, "ADD")
+
+    def _import_volumes(self, volumes: list[VolumeData]) -> None:
+        for volume in volumes:
+            parent = self.bone_objects.get(volume.bone_name or "")
+            try:
+                obj = self._create_volume_object(volume)
+            except ExportError as exc:
+                self.warnings.append(str(exc))
+                continue
+            self._set_parent_and_matrix(obj, parent, self._decode_matrix_rows(volume.matrix or self._identity_matrix_rows()))
+            obj["goh_is_volume"] = True
+            obj["goh_volume_name"] = volume.entry_name
+            obj["goh_volume_bone"] = volume.bone_name or ""
+            obj["goh_volume_kind"] = volume.volume_kind
+            obj.display_type = "WIRE"
+            obj.hide_render = True
+            if self.volume_collection is not None and self.volume_collection.objects.get(obj.name) is None:
+                self.volume_collection.objects.link(obj)
+
+    def _create_volume_object(self, volume: VolumeData) -> bpy.types.Object:
+        kind = (volume.volume_kind or "polyhedron").lower()
+        if kind == "polyhedron":
+            if not volume.file_name:
+                raise ExportError(f'Volume "{volume.entry_name}" has no .vol file reference.')
+            volume_path = self._resolve_asset_path(volume.file_name)
+            if volume_path is None:
+                raise ExportError(f'Volume file "{volume.file_name}" referenced by "{volume.entry_name}" was not found.')
+            volume_data = read_volume(volume_path)
+            vertices = [self._decode_point(vertex) for vertex in volume_data.vertices]
+            faces = list(volume_data.triangles)
+        elif kind == "box":
+            size = volume.box_size or (1.0, 1.0, 1.0)
+            vertices, faces = self._box_mesh(size)
+        elif kind == "sphere":
+            vertices, faces = self._sphere_mesh(volume.sphere_radius or 1.0)
+        elif kind == "cylinder":
+            vertices, faces = self._cylinder_mesh(volume.cylinder_radius or 0.5, volume.cylinder_length or 1.0)
+        else:
+            raise ExportError(f'Unsupported volume kind "{kind}" on "{volume.entry_name}".')
+        mesh = bpy.data.meshes.new(f"{volume.entry_name}_vol_mesh")
+        mesh.from_pydata(vertices, [], faces)
+        mesh.update()
+        obj = bpy.data.objects.new(f"{volume.entry_name}_vol", mesh)
+        self._link_object(obj)
+        return obj
+
+    def _box_mesh(self, size: tuple[float, float, float]) -> tuple[list[Vector], list[tuple[int, ...]]]:
+        sx, sy, sz = (self._decode_length(value) * 0.5 for value in size)
+        vertices = [
+            Vector((-sx, -sy, -sz)), Vector((sx, -sy, -sz)), Vector((sx, sy, -sz)), Vector((-sx, sy, -sz)),
+            Vector((-sx, -sy, sz)), Vector((sx, -sy, sz)), Vector((sx, sy, sz)), Vector((-sx, sy, sz)),
+        ]
+        faces = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1), (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)]
+        return vertices, faces
+
+    def _sphere_mesh(self, radius: float, segments: int = 16, rings: int = 8) -> tuple[list[Vector], list[tuple[int, ...]]]:
+        radius = self._decode_length(radius)
+        vertices = [Vector((0.0, 0.0, radius))]
+        for ring in range(1, rings):
+            phi = math.pi * ring / rings
+            z = math.cos(phi) * radius
+            r = math.sin(phi) * radius
+            for segment in range(segments):
+                theta = 2.0 * math.pi * segment / segments
+                vertices.append(Vector((math.cos(theta) * r, math.sin(theta) * r, z)))
+        vertices.append(Vector((0.0, 0.0, -radius)))
+        bottom_index = len(vertices) - 1
+        faces: list[tuple[int, ...]] = []
+        for segment in range(segments):
+            faces.append((0, 1 + segment, 1 + ((segment + 1) % segments)))
+        for ring in range(rings - 2):
+            start = 1 + ring * segments
+            next_start = start + segments
+            for segment in range(segments):
+                faces.append((start + segment, next_start + segment, next_start + ((segment + 1) % segments), start + ((segment + 1) % segments)))
+        last_ring = 1 + (rings - 2) * segments
+        for segment in range(segments):
+            faces.append((last_ring + ((segment + 1) % segments), last_ring + segment, bottom_index))
+        return vertices, faces
+
+    def _cylinder_mesh(self, radius: float, length: float, segments: int = 16) -> tuple[list[Vector], list[tuple[int, ...]]]:
+        radius = self._decode_length(radius)
+        half_length = self._decode_length(length) * 0.5
+        vertices: list[Vector] = []
+        for z in (-half_length, half_length):
+            for segment in range(segments):
+                theta = 2.0 * math.pi * segment / segments
+                vertices.append(Vector((math.cos(theta) * radius, math.sin(theta) * radius, z)))
+        faces: list[tuple[int, ...]] = []
+        faces.append(tuple(reversed(range(segments))))
+        faces.append(tuple(range(segments, segments * 2)))
+        for segment in range(segments):
+            faces.append((segment, (segment + 1) % segments, segments + ((segment + 1) % segments), segments + segment))
+        return vertices, faces
+
+    def _material_for_file(self, material_file: str) -> bpy.types.Material:
+        if material_file in self.material_cache:
+            return self.material_cache[material_file]
+        material_path = self._resolve_asset_path(material_file)
+        if self.operator.import_materials and material_path is not None:
+            try:
+                material_def = read_material(material_path)
+            except ExportError as exc:
+                self.warnings.append(str(exc))
+                material_def = MaterialDef(file_name=material_file)
+        else:
+            material_def = MaterialDef(file_name=material_file)
+        material = bpy.data.materials.new(sanitized_file_stem(Path(material_file).stem))
+        alpha = material_def.color_rgba[3] / 255.0 if material_def.blend in {"alpha", "blend"} else 1.0
+        material.diffuse_color = (
+            material_def.color_rgba[0] / 255.0,
+            material_def.color_rgba[1] / 255.0,
+            material_def.color_rgba[2] / 255.0,
+            alpha,
+        )
+        material["goh_import_mtl"] = material_file
+        for prop_name, value in (
+            ("goh_diffuse", material_def.diffuse_texture),
+            ("goh_bump", material_def.bump_texture),
+            ("goh_specular", material_def.specular_texture),
+            ("goh_lightmap", material_def.lightmap_texture),
+            ("goh_mask", material_def.mask_texture),
+            ("goh_height", material_def.height_texture),
+            ("goh_diffuse1", material_def.diffuse1_texture),
+            ("goh_simple", material_def.simple_texture),
+            ("goh_envmap_texture", material_def.envmap_texture),
+            ("goh_bump_volume", material_def.bump_volume_texture),
+        ):
+            if value:
+                material[prop_name] = value
+        if material_def.needs_bump:
+            material["goh_material_kind"] = "bump"
+        elif material_def.shader:
+            material["goh_material_kind"] = material_def.shader
+        if self.operator.load_textures:
+            self._attach_diffuse_texture(material, material_def)
+        self.material_cache[material_file] = material
+        return material
+
+    def _attach_diffuse_texture(self, material: bpy.types.Material, material_def: MaterialDef) -> None:
+        texture_name = material_def.diffuse_texture or material_def.simple_texture
+        if not texture_name:
+            return
+        image_path = self._resolve_texture_path(texture_name)
+        if image_path is None:
+            return
+        try:
+            image = bpy.data.images.load(str(image_path), check_existing=True)
+        except RuntimeError:
+            self.warnings.append(f'Texture "{texture_name}" could not be loaded by Blender.')
+            return
+        material.use_nodes = True
+        node_tree = material.node_tree
+        if node_tree is None:
+            return
+        tex_node = node_tree.nodes.new(type="ShaderNodeTexImage")
+        tex_node.image = image
+        principled = next((node for node in node_tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
+        if principled is not None and "Base Color" in principled.inputs:
+            node_tree.links.new(tex_node.outputs["Color"], principled.inputs["Base Color"])
+
+    def _resolve_asset_path(self, file_name: str) -> Path | None:
+        raw = Path(file_name.replace("\\", "/"))
+        candidates = [raw] if raw.is_absolute() else [self.input_dir / raw, self.input_dir / raw.name]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _resolve_texture_path(self, texture_name: str) -> Path | None:
+        raw = Path(texture_name.replace("\\", "/"))
+        extensions = ("", ".dds", ".tga", ".png", ".jpg", ".jpeg")
+        search_dirs = [
+            self.input_dir,
+            self.input_dir / "texture",
+            self.input_dir / "textures",
+            self.input_dir.parent / "texture",
+            self.input_dir.parent / "textures",
+        ]
+        candidates: list[Path] = []
+        if raw.is_absolute():
+            candidates.extend(raw.with_suffix(ext) if ext and not raw.suffix else raw for ext in extensions)
+        else:
+            for search_dir in search_dirs:
+                for ext in extensions:
+                    candidates.append(search_dir / (raw.with_suffix(ext) if ext and not raw.suffix else raw))
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _link_object(self, obj: bpy.types.Object) -> None:
+        collection = self.root_collection or self.context.scene.collection
+        if collection.objects.get(obj.name) is None:
+            collection.objects.link(obj)
+        self.imported_objects.append(obj)
+
+    def _ensure_child_collection(self, name: str, parent: bpy.types.Collection) -> bpy.types.Collection:
+        existing = parent.children.get(name)
+        if existing is not None:
+            return existing
+        collection = bpy.data.collections.new(name)
+        parent.children.link(collection)
+        return collection
+
+    def _set_parent_and_matrix(self, obj: bpy.types.Object, parent: bpy.types.Object | None, local_matrix: Matrix) -> None:
+        obj.parent = parent
+        if parent is None:
+            obj.matrix_world = local_matrix
+        else:
+            obj.matrix_parent_inverse = Matrix.Identity(4)
+            obj.matrix_local = local_matrix
+        self._store_rest_local_matrix(obj, local_matrix)
+
+    def _store_rest_local_matrix(self, obj: bpy.types.Object, local_matrix: Matrix) -> None:
+        obj["goh_rest_matrix_local"] = [
+            float(local_matrix[row][column])
+            for row in range(4)
+            for column in range(4)
+        ]
+
+    def _decode_matrix_rows(self, matrix_rows: tuple[tuple[float, float, float], ...]) -> Matrix:
+        axis3 = self.axis_rotation.to_3x3()
+        rotation = Matrix((matrix_rows[0], matrix_rows[1], matrix_rows[2]))
+        converted_rotation = axis3.inverted() @ rotation @ axis3
+        location = axis3.inverted() @ Vector(matrix_rows[3])
+        if abs(self.scale_factor) > EPSILON:
+            location /= self.scale_factor
+        return Matrix.Translation(location) @ converted_rotation.to_4x4()
+
+    def _decode_point(self, point: tuple[float, float, float]) -> Vector:
+        converted = self.axis_rotation.to_3x3().inverted() @ Vector(point)
+        if abs(self.scale_factor) > EPSILON:
+            converted /= self.scale_factor
+        return Vector((converted.x, converted.y, converted.z))
+
+    def _decode_length(self, value: float) -> float:
+        if abs(self.scale_factor) <= EPSILON:
+            return float(value)
+        return float(value) / self.scale_factor
+
+    def _axis_rotation_matrix(self, axis_mode: str) -> Matrix:
+        if axis_mode == "GOH_TO_BLENDER":
+            return Matrix.Rotation(-math.pi / 2.0, 4, "Z")
+        return Matrix.Identity(4)
+
+    def _identity_matrix_rows(self) -> tuple[tuple[float, float, float], ...]:
+        return (
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.0, 0.0, 0.0),
+        )
 
 
 class EXPORT_SCENE_OT_goh_model(Operator, ExportHelper):
@@ -3497,6 +5198,55 @@ class EXPORT_SCENE_OT_goh_model(Operator, ExportHelper):
         return super().invoke(context, event)
 
 
+class IMPORT_SCENE_OT_goh_model(Operator, ImportHelper):
+    bl_idname = "import_scene.goh_model"
+    bl_label = "Import GOH Model"
+    bl_options = {"PRESET"}
+
+    filename_ext = ".mdl"
+    filter_glob: StringProperty(default="*.mdl", options={"HIDDEN"})
+    axis_mode: EnumProperty(
+        name="Axis Conversion",
+        items=(
+            ("NONE", "None / GOH Native", "Import GOH coordinates directly. Best for SOEdit-style round trips"),
+            ("GOH_TO_BLENDER", "GOH -> Blender", "Rotate GOH X-forward coordinates into a Blender-friendly orientation"),
+        ),
+        default="NONE",
+    )
+    scale_factor: FloatProperty(name="Scale Factor", default=GOH_NATIVE_SCALE, min=0.001, soft_max=1000.0)
+    flip_v: BoolProperty(name="Flip V", default=True)
+    import_materials: BoolProperty(name="Import Materials", default=True)
+    load_textures: BoolProperty(name="Load Diffuse Textures", default=True)
+    import_volumes: BoolProperty(name="Import Volumes", default=True)
+    import_lod0_only: BoolProperty(name="LOD0 Only", default=True)
+
+    def draw(self, _context: bpy.types.Context) -> None:
+        layout = self.layout
+        layout.prop(self, "axis_mode")
+        layout.prop(self, "scale_factor")
+        layout.prop(self, "flip_v")
+        layout.prop(self, "import_materials")
+        layout.prop(self, "load_textures")
+        layout.prop(self, "import_volumes")
+        layout.prop(self, "import_lod0_only")
+
+    def execute(self, context: bpy.types.Context):
+        importer = GOHModelImporter(context, self)
+        try:
+            count, warnings = importer.import_model()
+        except ExportError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:  # pragma: no cover - Blender runtime guard
+            self.report({"ERROR"}, f"Unexpected GOH model import error: {exc}")
+            raise
+
+        for warning in warnings[:10]:
+            self.report({"WARNING"}, warning)
+        self.report({"INFO"}, f"GOH model imported: {self.filepath} ({count} object(s))")
+        return {"FINISHED"}
+
+
 class IMPORT_SCENE_OT_goh_anm(Operator, ImportHelper):
     bl_idname = "import_scene.goh_anm"
     bl_label = "Import GOH Animation"
@@ -3509,10 +5259,11 @@ class IMPORT_SCENE_OT_goh_anm(Operator, ImportHelper):
     axis_mode: EnumProperty(
         name="Axis Conversion",
         items=(
+            ("AUTO", "Auto / Match Imported Model", "Use the axis and scale metadata stored by Import GOH Model when available"),
             ("GOH_TO_BLENDER", "GOH -> Blender", "Convert GOH X-forward transforms back into Blender space"),
             ("NONE", "None", "Use ANM transforms exactly as stored"),
         ),
-        default="GOH_TO_BLENDER",
+        default="AUTO",
     )
     scale_factor: FloatProperty(name="Scale Factor", default=GOH_NATIVE_SCALE, min=0.001, soft_max=1000.0)
 
@@ -3757,46 +5508,11 @@ class SCENE_OT_goh_report_textures(Operator):
             self.report({"ERROR"}, "GOH tool settings are not available.")
             return {"CANCELLED"}
 
-        materials: list[bpy.types.Material] = []
-        if settings.texture_scope == "ALL":
-            materials = [material for material in bpy.data.materials if material is not None]
-        else:
-            if settings.texture_scope == "SELECTED":
-                source_objects = list(context.selected_objects)
-            else:
-                source_objects = [
-                    obj for obj in context.view_layer.objects
-                    if obj.type == "MESH" and obj.visible_get(view_layer=context.view_layer)
-                ]
-            seen: set[int] = set()
-            for obj in source_objects:
-                for slot in obj.material_slots:
-                    material = slot.material
-                    if material is None:
-                        continue
-                    pointer = material.as_pointer()
-                    if pointer in seen:
-                        continue
-                    seen.add(pointer)
-                    materials.append(material)
-
         texture_lines: list[str] = []
         seen_textures: set[str] = set()
-        texture_keys = (
-            "goh_diffuse",
-            "goh_bump",
-            "goh_specular",
-            "goh_lightmap",
-            "goh_mask",
-            "goh_height",
-            "goh_diffuse1",
-            "goh_simple",
-            "goh_envmap_texture",
-            "goh_bump_volume",
-        )
-        for material in sorted(materials, key=lambda item: item.name.lower()):
+        for material in sorted(_materials_for_tool_scope(context, settings.texture_scope), key=lambda item: item.name.lower()):
             entries: list[str] = []
-            for key in texture_keys:
+            for key in GOH_TEXTURE_PROP_KEYS:
                 value = material.get(key)
                 if value:
                     entries.append(str(value).strip())
@@ -3812,12 +5528,601 @@ class SCENE_OT_goh_report_textures(Operator):
                 texture_lines.append(f"{material.name}: {entry}")
 
         report_text = "\n".join(texture_lines) if texture_lines else "No textures found."
-        text_name = "GOH_Texture_Report.txt"
-        text_block = bpy.data.texts.get(text_name) or bpy.data.texts.new(text_name)
-        text_block.clear()
-        text_block.write(report_text)
+        _write_text_block("GOH_Texture_Report.txt", report_text)
         context.window_manager.clipboard = report_text
         self.report({"INFO"}, f"Reported {len(texture_lines)} texture reference(s).")
+        return {"FINISHED"}
+
+
+class SCENE_OT_goh_autofill_materials(Operator):
+    bl_idname = "scene.goh_autofill_materials"
+    bl_label = "Auto-Fill GOH Materials"
+    bl_description = "Infer GOH material texture properties from Blender image texture node names"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+
+        changed = 0
+        materials = _materials_for_tool_scope(context, settings.texture_scope)
+        for material in materials:
+            inferred = _infer_material_texture_props(material)
+            wrote_any = False
+            for key, value in inferred.items():
+                if not settings.material_overwrite and material.get(key):
+                    continue
+                material[key] = value
+                wrote_any = True
+            if wrote_any:
+                if inferred.get("goh_bump") or inferred.get("goh_specular"):
+                    material["goh_material_kind"] = "bump"
+                elif not material.get("goh_material_kind"):
+                    material["goh_material_kind"] = "simple"
+                changed += 1
+
+        self.report({"INFO"}, f"Auto-filled GOH texture fields on {changed} material(s).")
+        return {"FINISHED"}
+
+
+class SCENE_OT_goh_validate_scene(Operator):
+    bl_idname = "scene.goh_validate_scene"
+    bl_label = "Validate GOH Scene"
+    bl_description = "Scan the current GOH scene for common export mistakes and create a text report"
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        scope = settings.validation_scope if settings else "VISIBLE"
+        objects = _objects_for_tool_scope(context, scope)
+        materials = _materials_for_tool_scope(context, "ALL" if scope == "ALL" else scope)
+        errors: list[str] = []
+        warnings: list[str] = []
+        info: list[str] = []
+
+        basis_settings = getattr(context.scene, "goh_basis_settings", None)
+        has_basis = bool(basis_settings and basis_settings.enabled) or any(
+            obj.name.lower() == GOH_BASIS_HELPER_NAME.lower() or obj.get("goh_basis_helper")
+            for obj in context.scene.objects
+        )
+        if not has_basis:
+            warnings.append("Basis metadata is not enabled and no Basis helper was found.")
+
+        export_names: dict[str, list[str]] = {}
+        for obj in objects:
+            if _is_tool_helper_object(obj):
+                continue
+            if obj.type not in {"MESH", "EMPTY", "ARMATURE"}:
+                continue
+            export_names.setdefault(_tool_export_name(obj).lower(), []).append(obj.name)
+            if obj.type == "MESH":
+                if not obj.material_slots:
+                    warnings.append(f'Mesh "{obj.name}" has no material slot.')
+                if any(abs(value - 1.0) > 1e-4 for value in obj.scale):
+                    warnings.append(f'Mesh "{obj.name}" has unapplied object scale.')
+                lod_value = str(obj.get("goh_lod_files") or "").strip()
+                if lod_value:
+                    bad_lods = [
+                        entry.strip()
+                        for entry in re.split(r"[,;\n]+", lod_value)
+                        if entry.strip() and not entry.strip().lower().endswith(".ply")
+                    ]
+                    if bad_lods:
+                        warnings.append(f'Mesh "{obj.name}" has non-.ply LOD entries: {", ".join(bad_lods)}')
+
+        for export_name, object_names in sorted(export_names.items()):
+            if export_name and len(object_names) > 1:
+                warnings.append(f'Duplicate GOH export name "{export_name}" on objects: {", ".join(object_names)}')
+
+        for obj in objects:
+            if not _is_tool_volume_object(obj):
+                continue
+            volume_kind = str(obj.get("goh_volume_kind") or "polyhedron").strip().lower()
+            if volume_kind not in GOH_VOLUME_KIND_VALUES:
+                errors.append(f'Volume "{obj.name}" has unsupported goh_volume_kind "{volume_kind}".')
+            if not str(obj.get("goh_volume_bone") or "").strip() and not obj.name.lower().endswith("_vol"):
+                warnings.append(f'Volume "{obj.name}" has no goh_volume_bone and cannot derive one from _vol naming.')
+            if volume_kind == "polyhedron" and obj.type == "MESH" and len(obj.data.vertices) > 65535:
+                info.append(f'Volume "{obj.name}" exceeds 65535 vertices and will be split into multiple .vol files.')
+
+        for material in materials:
+            if not _material_has_goh_texture(material):
+                inferred = _infer_material_texture_props(material)
+                if inferred:
+                    warnings.append(f'Material "{material.name}" has image textures but no GOH texture fields. Run Auto-Fill GOH Materials.')
+                elif material.node_tree:
+                    warnings.append(f'Material "{material.name}" has no recognized GOH texture naming pattern.')
+            if material.node_tree:
+                for node in material.node_tree.nodes:
+                    if node.type != "TEX_IMAGE" or not node.image:
+                        continue
+                    image_path = _image_source_path(node.image)
+                    if image_path is not None and not image_path.exists():
+                        warnings.append(f'Material "{material.name}" references missing texture file: {image_path}')
+
+        lines = [
+            "GOH Validation Report",
+            f"Scope: {scope}",
+            f"Objects: {len(objects)}",
+            f"Materials: {len(materials)}",
+            f"Errors: {len(errors)}",
+            f"Warnings: {len(warnings)}",
+            f"Info: {len(info)}",
+            "",
+        ]
+        for title, bucket in (("ERRORS", errors), ("WARNINGS", warnings), ("INFO", info)):
+            lines.append(title)
+            if bucket:
+                lines.extend(f"- {entry}" for entry in bucket)
+            else:
+                lines.append("- None")
+            lines.append("")
+
+        report_text = "\n".join(lines).rstrip() + "\n"
+        _write_text_block("GOH_Validation_Report.txt", report_text)
+        context.window_manager.clipboard = report_text
+        if errors:
+            self.report({"ERROR"}, f"GOH validation found {len(errors)} error(s) and {len(warnings)} warning(s).")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"GOH validation finished with {len(warnings)} warning(s).")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_assign_lod_files(Operator):
+    bl_idname = "object.goh_assign_lod_files"
+    bl_label = "Assign LOD Files"
+    bl_description = "Write goh_lod_files for selected visual mesh objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return any(obj.type == "MESH" for obj in context.selected_objects)
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+        count = 0
+        for obj in sorted(context.selected_objects, key=lambda item: item.name.lower()):
+            if obj.type != "MESH" or _is_tool_helper_object(obj):
+                continue
+            stem = sanitized_file_stem(str(obj.get("goh_bone_name") or obj.name))
+            files = [f"{stem}.ply"]
+            files.extend(f"{stem}_lod{index}.ply" for index in range(1, settings.lod_levels + 1))
+            obj["goh_lod_files"] = ";".join(files)
+            _set_custom_bool_prop(obj, "goh_lod_off", bool(settings.lod_mark_off))
+            count += 1
+        if count == 0:
+            self.report({"WARNING"}, "No visual mesh objects were selected for LOD assignment.")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Assigned LOD file lists to {count} mesh object(s).")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_create_volume_from_bounds(Operator):
+    bl_idname = "object.goh_create_volume_from_bounds"
+    bl_label = "Volume From Bounds"
+    bl_description = "Create GOH collision volume helpers from the selected mesh bounding boxes"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return any(obj.type == "MESH" and not _is_tool_helper_object(obj) for obj in context.selected_objects)
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+
+        created: list[bpy.types.Object] = []
+        source_objects = [
+            obj for obj in sorted(context.selected_objects, key=lambda item: item.name.lower())
+            if obj.type == "MESH" and not _is_tool_helper_object(obj)
+        ]
+        for obj in source_objects:
+            world_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+            if not world_corners:
+                continue
+            min_corner = Vector((
+                min(point.x for point in world_corners),
+                min(point.y for point in world_corners),
+                min(point.z for point in world_corners),
+            ))
+            max_corner = Vector((
+                max(point.x for point in world_corners),
+                max(point.y for point in world_corners),
+                max(point.z for point in world_corners),
+            ))
+            center = (min_corner + max_corner) * 0.5
+            size = max_corner - min_corner
+            if size.length <= EPSILON:
+                continue
+            bone_name = str(obj.get("goh_bone_name") or obj.name).strip()
+            volume_name = sanitized_file_stem(bone_name)
+            helper_name = f"{volume_name}_vol"
+
+            bpy.ops.mesh.primitive_cube_add(size=1.0, location=center)
+            helper = context.active_object
+            helper.name = helper_name
+            helper.display_type = "WIRE"
+            helper.show_in_front = True
+            helper.dimensions = (max(size.x, EPSILON), max(size.y, EPSILON), max(size.z, EPSILON))
+            context.view_layer.update()
+            helper["goh_is_volume"] = True
+            helper["goh_volume_name"] = volume_name
+            helper["goh_volume_bone"] = bone_name
+            helper["goh_volume_kind"] = settings.helper_volume_kind.lower()
+            _link_to_helper_collection(context.scene, helper, "GOH_VOLUMES")
+            created.append(helper)
+
+        if not created:
+            self.report({"WARNING"}, "No bounds volumes were created.")
+            return {"CANCELLED"}
+        bpy.ops.object.select_all(action="DESELECT")
+        for helper in created:
+            helper.select_set(True)
+        context.view_layer.objects.active = created[-1]
+        self.report({"INFO"}, f"Created {len(created)} GOH volume helper(s) from mesh bounds.")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_create_recoil_action(Operator):
+    bl_idname = "object.goh_create_recoil_action"
+    bl_label = "Create Recoil Action"
+    bl_description = "Generate a baked local-axis recoil action on selected objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return bool(context.selected_objects)
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+        start = int(context.scene.frame_current)
+        total = max(3, int(settings.recoil_frames))
+        peak = start + max(1, total // 4)
+        settle = start + max(2, total // 2)
+        end = start + total
+        local_axis = _local_axis_vector(settings.recoil_axis)
+        count = 0
+
+        for obj in sorted(context.selected_objects, key=lambda item: item.name.lower()):
+            original_location = obj.location.copy()
+            direction = obj.matrix_world.to_3x3() @ local_axis
+            if direction.length <= EPSILON:
+                direction = local_axis
+            direction.normalize()
+            offset = direction * float(settings.recoil_distance)
+            action_name = f"goh_recoil_{sanitized_file_stem(obj.name)}"
+
+            obj.animation_data_create()
+            previous_action = getattr(obj.animation_data, "action", None)
+            action = bpy.data.actions.new(action_name)
+            obj.animation_data.action = action
+            sequence_name, file_stem = _physics_sequence_names("recoil", previous_action, obj)
+            obj.location = original_location
+            obj.keyframe_insert(data_path="location", frame=start)
+            obj.location = original_location + _object_local_offset_from_world(obj, offset)
+            obj.keyframe_insert(data_path="location", frame=peak)
+            obj.location = original_location - _object_local_offset_from_world(obj, offset * 0.18)
+            obj.keyframe_insert(data_path="location", frame=settle)
+            obj.location = original_location
+            obj.keyframe_insert(data_path="location", frame=end)
+            if settings.recoil_set_sequence:
+                _physics_mark_sequence(obj, sequence_name, file_stem)
+                _physics_mark_sequence(action, sequence_name, file_stem)
+            count += 1
+
+        if count == 0:
+            self.report({"WARNING"}, "No objects were available for recoil action generation.")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Created baked recoil action on {count} object(s).")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_assign_physics_link(Operator):
+    bl_idname = "object.goh_assign_physics_link"
+    bl_label = "Assign Physics Link"
+    bl_description = "Store a GOH physics-bake link from the active source object to the other selected objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return context.object is not None and len(context.selected_objects) >= 2
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        source = context.object
+        if settings is None or source is None:
+            self.report({"ERROR"}, "GOH tool settings or active source object are not available.")
+            return {"CANCELLED"}
+        source_id = _physics_object_id(source)
+        count = 0
+        for obj in sorted(context.selected_objects, key=lambda item: item.name.lower()):
+            if obj == source:
+                obj["goh_physics_source"] = source_id
+                obj["goh_physics_role"] = "SOURCE"
+                continue
+            obj["goh_physics_source"] = source_id
+            obj["goh_physics_role"] = settings.physics_link_role
+            weight, delay, frequency, damping, jitter, rotation = _physics_effective_link_values(settings, settings.physics_link_role)
+            obj["goh_physics_weight"] = weight
+            obj["goh_physics_delay"] = delay
+            obj["goh_physics_frequency"] = frequency
+            obj["goh_physics_damping"] = damping
+            obj["goh_physics_jitter"] = jitter
+            obj["goh_physics_rotation"] = rotation
+            count += 1
+        if count == 0:
+            self.report({"WARNING"}, "Select at least one linked object in addition to the active source.")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Assigned GOH physics link from {source.name} to {count} object(s).")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_bake_linked_recoil(Operator):
+    bl_idname = "object.goh_bake_linked_recoil"
+    bl_label = "Bake Linked Recoil"
+    bl_description = "Bake source recoil plus linked spring/jitter responses into regular object keyframes"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return context.object is not None
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        source = context.object
+        if settings is None or source is None:
+            self.report({"ERROR"}, "GOH tool settings or active source object are not available.")
+            return {"CANCELLED"}
+
+        linked = _physics_linked_objects(context, source, settings.physics_include_scene_links)
+
+        start = int(context.scene.frame_current)
+        total = max(3, int(settings.recoil_frames))
+        clip_total = _physics_max_clip_frames(settings, linked, total)
+        source_end = start + total
+        end = start + clip_total
+        peak = start + max(1, total // 4)
+        settle = start + max(2, total // 2)
+        source_axis = _physics_axis_world(source, settings.recoil_axis)
+        distance = float(settings.recoil_distance)
+        sequence_name, file_stem = _physics_sequence_names(
+            "recoil",
+            getattr(getattr(source, "animation_data", None), "action", None),
+            source,
+        )
+
+        _physics_bake_source_recoil(
+            source,
+            source_axis,
+            distance,
+            start,
+            peak,
+            settle,
+            source_end,
+            sequence_name=sequence_name,
+            file_stem=file_stem,
+            write_object_sequence=settings.recoil_set_sequence,
+            clip_end=end,
+        )
+        for obj in sorted(linked, key=lambda item: item.name.lower()):
+            linked_sequence_name, linked_file_stem = _physics_sequence_names(
+                sequence_name,
+                obj,
+                source,
+            )
+            _physics_bake_linked_response(
+                obj,
+                source_axis,
+                distance,
+                start,
+                end,
+                settings,
+                sequence_name=linked_sequence_name,
+                file_stem=linked_file_stem,
+                base_duration=total,
+            )
+
+        self.report({"INFO"}, f"Baked linked recoil: source {source.name}, linked parts {len(linked)}.")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_bake_directional_recoil_set(Operator):
+    bl_idname = "object.goh_bake_directional_recoil_set"
+    bl_label = "Bake Directional Set"
+    bl_description = "Bake a set of directional recoil clips and optional linked spring responses into NLA strips"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return context.object is not None
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        source = context.object
+        if settings is None or source is None:
+            self.report({"ERROR"}, "GOH tool settings or active source object are not available.")
+            return {"CANCELLED"}
+
+        linked = _physics_linked_objects(context, source, settings.physics_include_scene_links)
+        start_base = int(context.scene.frame_current)
+        total = max(3, int(settings.recoil_frames))
+        clip_total = _physics_max_clip_frames(settings, linked, total)
+        distance = float(settings.recoil_distance)
+        gap = 2
+        clip_specs = _physics_direction_specs(settings.physics_direction_set, settings.physics_clip_prefix)
+
+        for index, (clip_name, axis_key) in enumerate(clip_specs):
+            start = start_base + index * (clip_total + gap)
+            source_end = start + total
+            end = start + clip_total
+            peak = start + max(1, total // 4)
+            settle = start + max(2, total // 2)
+            source_axis = _physics_axis_world(source, axis_key)
+            _physics_bake_source_recoil(
+                source,
+                source_axis,
+                distance,
+                start,
+                peak,
+                settle,
+                source_end,
+                action_prefix="goh_directional_recoil_source",
+                sequence_name=clip_name,
+                file_stem=clip_name,
+                create_nla=settings.physics_create_nla_clips,
+                clip_end=end,
+            )
+            for obj in sorted(linked, key=lambda item: item.name.lower()):
+                _physics_bake_linked_response(
+                    obj,
+                    source_axis,
+                    distance,
+                    start,
+                    end,
+                    settings,
+                    action_prefix="goh_directional_recoil_link",
+                    sequence_name=clip_name,
+                    file_stem=clip_name,
+                    create_nla=settings.physics_create_nla_clips,
+                    base_duration=total,
+                )
+
+        context.scene.frame_set(start_base)
+        self.report({"INFO"}, f"Baked {len(clip_specs)} directional recoil clip(s) from {source.name}.")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_bake_impact_response(Operator):
+    bl_idname = "object.goh_bake_impact_response"
+    bl_label = "Bake Impact Response"
+    bl_description = "Bake a damped hit/impact shake action on selected objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return bool(context.selected_objects)
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+        clip_name = sanitized_file_stem(settings.physics_impact_clip_name or "hit") or "hit"
+        start = int(context.scene.frame_current)
+        base_total = max(3, int(settings.recoil_frames))
+        selected_objects = list(context.selected_objects)
+        end = start + _physics_max_duration_frames(settings, selected_objects, base_total)
+        distance = float(settings.recoil_distance)
+        count = 0
+        for obj in sorted(selected_objects, key=lambda item: item.name.lower()):
+            axis = _physics_axis_world(obj, settings.recoil_axis)
+            _physics_bake_impact_response(
+                obj,
+                axis,
+                distance,
+                start,
+                end,
+                settings,
+                sequence_name=clip_name,
+                create_nla=settings.physics_create_nla_clips,
+                base_duration=base_total,
+            )
+            count += 1
+        self.report({"INFO"}, f"Baked impact response on {count} object(s).")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_create_armor_ripple(Operator):
+    bl_idname = "object.goh_create_armor_ripple"
+    bl_label = "Create Armor Ripple"
+    bl_description = "Create per-frame shape keys for a small armor ripple mesh-animation effect around the 3D cursor"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return any(obj.type == "MESH" for obj in context.selected_objects)
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+        clip_name = sanitized_file_stem(settings.physics_impact_clip_name or "hit") or "hit"
+        start = int(context.scene.frame_current)
+        end = start + max(3, int(settings.recoil_frames))
+        center_world = context.scene.cursor.location.copy()
+        count = 0
+        for obj in sorted(context.selected_objects, key=lambda item: item.name.lower()):
+            if obj.type != "MESH":
+                continue
+            axis = _physics_axis_world(obj, settings.recoil_axis)
+            if _physics_create_armor_ripple(
+                obj,
+                center_world,
+                axis,
+                start,
+                end,
+                settings,
+                sequence_name=clip_name,
+                create_nla=settings.physics_create_nla_clips,
+            ):
+                count += 1
+        if count == 0:
+            self.report({"WARNING"}, "Select at least one mesh object for armor ripple generation.")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Created armor ripple shape-key animation on {count} mesh object(s).")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_load_physics_defaults(Operator):
+    bl_idname = "object.goh_load_physics_defaults"
+    bl_label = "Load Role Defaults"
+    bl_description = "Load useful spring, damping, jitter, and rotation defaults for the selected link role"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+        weight, frequency, damping, rotation = _physics_role_defaults(settings.physics_link_role)
+        settings.physics_link_weight = weight
+        settings.physics_link_delay = _physics_role_delay_default(settings.physics_link_role)
+        settings.physics_link_frequency = frequency
+        settings.physics_link_damping = damping
+        settings.physics_link_rotation = rotation
+        settings.physics_link_jitter = _physics_role_jitter_default(settings.physics_link_role)
+        self.report({"INFO"}, f"Loaded physics defaults for {settings.physics_link_role}.")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_clear_physics_links(Operator):
+    bl_idname = "object.goh_clear_physics_links"
+    bl_label = "Clear Physics Links"
+    bl_description = "Clear GOH physics link metadata and optionally detach generated physics actions/NLA strips"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return bool(context.selected_objects)
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        clear_actions = bool(getattr(settings, "physics_clear_actions", False))
+        count = 0
+        for obj in sorted(context.selected_objects, key=lambda item: item.name.lower()):
+            if _physics_clear_object(obj, clear_actions):
+                count += 1
+        self.report({"INFO"}, f"Cleared GOH physics data on {count} object(s).")
         return {"FINISHED"}
 
 
@@ -3900,7 +6205,62 @@ class VIEW3D_PT_goh_tools(Panel):
         texture_box = layout.box()
         texture_box.label(text="Texture Tool")
         texture_box.prop(settings, "texture_scope")
+        texture_box.prop(settings, "material_overwrite")
+        texture_box.operator(SCENE_OT_goh_autofill_materials.bl_idname, text="Auto-Fill GOH Materials")
         texture_box.operator(SCENE_OT_goh_report_textures.bl_idname, text="Report Texture Names")
+
+        validation_box = layout.box()
+        validation_box.label(text="Validation")
+        validation_box.prop(settings, "validation_scope")
+        validation_box.operator(SCENE_OT_goh_validate_scene.bl_idname, text="Validate GOH Scene")
+
+        lod_box = layout.box()
+        lod_box.label(text="LOD Helpers")
+        lod_box.prop(settings, "lod_levels")
+        lod_box.prop(settings, "lod_mark_off")
+        lod_box.operator(OBJECT_OT_goh_assign_lod_files.bl_idname, text="Assign LOD Files")
+
+        collision_box = layout.box()
+        collision_box.label(text="Collision Helpers")
+        collision_box.prop(settings, "helper_volume_kind")
+        collision_box.operator(OBJECT_OT_goh_create_volume_from_bounds.bl_idname, text="Volume From Bounds")
+
+        physics_box = layout.box()
+        physics_box.label(text="Physics Bake Presets")
+        physics_box.prop(settings, "recoil_axis")
+        physics_box.prop(settings, "recoil_distance")
+        physics_box.prop(settings, "recoil_frames")
+        physics_box.prop(settings, "recoil_set_sequence")
+        physics_box.operator(OBJECT_OT_goh_create_recoil_action.bl_idname, text="Create Recoil Action")
+        physics_box.separator()
+        physics_box.prop(settings, "physics_direction_set")
+        physics_box.prop(settings, "physics_clip_prefix")
+        physics_box.prop(settings, "physics_impact_clip_name")
+        physics_box.prop(settings, "physics_ripple_amplitude")
+        physics_box.prop(settings, "physics_ripple_radius")
+        physics_box.prop(settings, "physics_ripple_waves")
+        physics_box.prop(settings, "physics_power")
+        physics_box.prop(settings, "physics_duration_scale")
+        physics_box.prop(settings, "physics_create_nla_clips")
+        row = physics_box.row(align=True)
+        row.operator(OBJECT_OT_goh_bake_directional_recoil_set.bl_idname, text="Bake Directional Set")
+        row.operator(OBJECT_OT_goh_bake_impact_response.bl_idname, text="Bake Impact Response")
+        physics_box.operator(OBJECT_OT_goh_create_armor_ripple.bl_idname, text="Create Armor Ripple")
+        physics_box.separator()
+        physics_box.prop(settings, "physics_link_role")
+        physics_box.operator(OBJECT_OT_goh_load_physics_defaults.bl_idname, text="Load Role Defaults")
+        physics_box.prop(settings, "physics_link_weight")
+        physics_box.prop(settings, "physics_link_delay")
+        physics_box.prop(settings, "physics_link_frequency")
+        physics_box.prop(settings, "physics_link_damping")
+        physics_box.prop(settings, "physics_link_jitter")
+        physics_box.prop(settings, "physics_link_rotation")
+        physics_box.prop(settings, "physics_include_scene_links")
+        row = physics_box.row(align=True)
+        row.operator(OBJECT_OT_goh_assign_physics_link.bl_idname, text="Assign Physics Link")
+        row.operator(OBJECT_OT_goh_bake_linked_recoil.bl_idname, text="Bake Linked Recoil")
+        physics_box.prop(settings, "physics_clear_actions")
+        physics_box.operator(OBJECT_OT_goh_clear_physics_links.bl_idname, text="Clear Physics Links")
 
 
 class VIEW3D_PT_goh_presets(Panel):
@@ -3957,6 +6317,7 @@ class VIEW3D_PT_goh_export_help(Panel):
     def draw(self, _context: bpy.types.Context) -> None:
         layout = self.layout
         layout.operator(EXPORT_SCENE_OT_goh_model.bl_idname, text="Export GOH Model")
+        layout.operator(IMPORT_SCENE_OT_goh_model.bl_idname, text="Import GOH Model")
         layout.operator(IMPORT_SCENE_OT_goh_anm.bl_idname, text="Import GOH Animation")
         layout.label(text="网格对象 Mesh objects 会导出为 GOH bones。", translate=False)
         layout.label(text='辅助体 Helpers 可用 "_vol"、GOH_VOLUMES、GOH_OBSTACLES、GOH_AREAS 识别。', translate=False)
@@ -3971,6 +6332,7 @@ def menu_func_export(self, _context):
 
 
 def menu_func_import(self, _context):
+    self.layout.operator(IMPORT_SCENE_OT_goh_model.bl_idname, text="GOH Model (.mdl)")
     self.layout.operator(IMPORT_SCENE_OT_goh_anm.bl_idname, text="GOH Animation (.anm)")
 
 
@@ -3979,6 +6341,7 @@ CLASSES = (
     GOHBasisSettings,
     GOHToolSettings,
     EXPORT_SCENE_OT_goh_model,
+    IMPORT_SCENE_OT_goh_model,
     IMPORT_SCENE_OT_goh_anm,
     OBJECT_OT_goh_apply_preset,
     SCENE_OT_goh_copy_basis_legacy,
@@ -3986,6 +6349,18 @@ CLASSES = (
     OBJECT_OT_goh_apply_transform_block,
     OBJECT_OT_goh_weapon_tool,
     SCENE_OT_goh_report_textures,
+    SCENE_OT_goh_autofill_materials,
+    SCENE_OT_goh_validate_scene,
+    OBJECT_OT_goh_assign_lod_files,
+    OBJECT_OT_goh_create_volume_from_bounds,
+    OBJECT_OT_goh_create_recoil_action,
+    OBJECT_OT_goh_assign_physics_link,
+    OBJECT_OT_goh_bake_linked_recoil,
+    OBJECT_OT_goh_bake_directional_recoil_set,
+    OBJECT_OT_goh_bake_impact_response,
+    OBJECT_OT_goh_create_armor_ripple,
+    OBJECT_OT_goh_load_physics_defaults,
+    OBJECT_OT_goh_clear_physics_links,
     VIEW3D_PT_goh_basis,
     VIEW3D_PT_goh_tools,
     VIEW3D_PT_goh_presets,

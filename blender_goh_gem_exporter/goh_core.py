@@ -729,6 +729,585 @@ def _write_animation_frm2(
         previous_mesh_frame = current_mesh_data
 
 
+MdlBlock = list[object]
+
+
+def read_material(path: str | Path) -> MaterialDef:
+    path = Path(path)
+    blocks = _parse_mdl_blocks(path.read_text(encoding="utf-8", errors="ignore"))
+    material_block = next((block for block in blocks if _mdl_block_key(block) == "material"), None)
+    if material_block is None:
+        raise ExportError(f"Material file {path} does not contain a material block.")
+
+    tokens = _mdl_block_tokens(material_block)
+    shader = tokens[1].lower() if len(tokens) > 1 else "simple"
+    material = MaterialDef(file_name=path.name, shader=shader)
+    texture_options: dict[str, tuple[str, ...]] = {}
+    texture_targets = {
+        "diffuse": "diffuse_texture",
+        "bump": "bump_texture",
+        "specular": "specular_texture",
+        "lightmap": "lightmap_texture",
+        "mask": "mask_texture",
+        "height": "height_texture",
+        "diffuse1": "diffuse1_texture",
+        "simple": "simple_texture",
+        "envmap": "envmap_texture",
+        "bumpvolume": "bump_volume_texture",
+    }
+
+    for child in _mdl_child_blocks(material_block):
+        key = _mdl_block_key(child)
+        child_tokens = _mdl_block_tokens(child)
+        if key in texture_targets and len(child_tokens) >= 2:
+            setattr(material, texture_targets[key], child_tokens[1])
+            options = tuple(_mdl_inline_block(option) for option in _mdl_child_blocks(child))
+            if options:
+                texture_options[child_tokens[0]] = options
+            continue
+        if key == "color" and len(child_tokens) >= 2:
+            values = _float_tokens(child_tokens[1:])
+            if len(values) >= 4:
+                material.color_rgba = tuple(max(0, min(255, int(value))) for value in values[:4])  # type: ignore[assignment]
+            continue
+        if key == "blend" and len(child_tokens) >= 2:
+            material.blend = child_tokens[1].lower()
+            continue
+        if key in {"gloss_scale", "alpharef", "specular_intensity", "period", "envamount", "parallax_scale", "amount"}:
+            values = _float_tokens(child_tokens[1:])
+            if values:
+                setattr(material, key, values[0])
+            continue
+        if key == "tile":
+            material.tile = True
+        elif key == "glow":
+            material.glow = True
+        elif key == "nolight":
+            material.no_light = True
+        elif key == "full_specular":
+            material.full_specular = True
+        elif key == "emitsheat":
+            material.emits_heat = True
+        elif key == "translucency":
+            material.translucency = True
+        elif key == "alphatocoverage":
+            material.alpha_to_coverage = True
+        elif key == "no_outlines":
+            material.no_outlines = True
+        elif key == "fakereflection":
+            material.fake_reflection = True
+        else:
+            material.extra_lines.append(_mdl_inline_block(child))
+
+    material.texture_options = texture_options
+    return material
+
+
+def read_mesh(path: str | Path) -> MeshData:
+    path = Path(path)
+    with path.open("rb") as fp:
+        if _read_exact(fp, 4) != b"EPLY":
+            raise ExportError(f"{path} is not an EPLY mesh.")
+
+        skinned_bones: list[str] = []
+        section_headers: list[tuple[str, int, int, bool, tuple[int, int, int, int], tuple[int, ...], int]] = []
+        vertices: list[MeshVertex] = []
+        triangles: list[tuple[int, int, int]] = []
+        vflags = 0x0007
+        fvf = D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX1
+
+        while True:
+            chunk = fp.read(4)
+            if not chunk:
+                break
+            if len(chunk) != 4:
+                raise ExportError(f"Truncated chunk tag in {path}.")
+            if chunk == b"BNDS":
+                _read_exact(fp, 24)
+                continue
+            if chunk == b"SKIN":
+                count = struct.unpack("<I", _read_exact(fp, 4))[0]
+                skinned_bones = [_read_prefixed_string(fp) for _index in range(count)]
+                continue
+            if chunk == b"MESH":
+                fvf, first_face, face_count, flags = struct.unpack("<4I", _read_exact(fp, 16))
+                specular = (150, 150, 150, 25)
+                if flags & MESH_FLAG_SPECULAR:
+                    specular = uint_to_rgba(struct.unpack("<I", _read_exact(fp, 4))[0])
+                material_file = _read_prefixed_string(fp)
+                subskin_bones: tuple[int, ...] = ()
+                if flags & MESH_FLAG_SUBSKIN:
+                    subskin_count = struct.unpack("<B", _read_exact(fp, 1))[0]
+                    subskin_bones = tuple(_read_exact(fp, subskin_count))
+                section_headers.append((material_file, first_face, face_count, bool(flags & MESH_FLAG_TWO_SIDED), specular, subskin_bones, flags))
+                continue
+            if chunk == b"VERT":
+                vertex_count, vertex_stride, vflags = struct.unpack("<IHH", _read_exact(fp, 8))
+                uses_bump = any(flags & (MESH_FLAG_BUMP | MESH_FLAG_SPECULAR) for *_prefix, flags in section_headers)
+                skinned = bool(skinned_bones) or any(flags & MESH_FLAG_SKINNED for *_prefix, flags in section_headers)
+                base_stride = 12 + 12 + 8 + (16 if uses_bump else 0)
+                skin_extra = max(0, vertex_stride - base_stride)
+                explicit_weights = max(0, (skin_extra - 4) // 4) if skinned and skin_extra >= 4 else 0
+                for _index in range(vertex_count):
+                    start = fp.tell()
+                    position = struct.unpack("<3f", _read_exact(fp, 12))
+                    weights: tuple[float, ...] = ()
+                    bone_indices = (0, 0, 0, 0)
+                    if skinned and skin_extra >= 4:
+                        weights = tuple(struct.unpack(f"<{explicit_weights}f", _read_exact(fp, explicit_weights * 4))) if explicit_weights else ()
+                        bone_indices = tuple(_read_exact(fp, 4))  # type: ignore[assignment]
+                    normal = struct.unpack("<3f", _read_exact(fp, 12))
+                    uv = struct.unpack("<2f", _read_exact(fp, 8))
+                    tangent = (1.0, 0.0, 0.0)
+                    tangent_sign = 1.0
+                    if uses_bump:
+                        tangent = struct.unpack("<3f", _read_exact(fp, 12))
+                        tangent_sign = struct.unpack("<f", _read_exact(fp, 4))[0]
+                    fp.seek(start + vertex_stride)
+                    vertices.append(
+                        MeshVertex(
+                            position=position,
+                            normal=normal,
+                            uv=uv,
+                            tangent=tangent,
+                            tangent_sign=tangent_sign,
+                            weights=weights,
+                            bone_indices=bone_indices,
+                        )
+                    )
+                continue
+            if chunk in {b"INDX", b"IND4"}:
+                index_count = struct.unpack("<I", _read_exact(fp, 4))[0]
+                if index_count % 3:
+                    raise ExportError(f"Mesh {path} index count is not divisible by three.")
+                index_format = "<H" if chunk == b"INDX" else "<I"
+                index_size = 2 if chunk == b"INDX" else 4
+                indices = [struct.unpack(index_format, _read_exact(fp, index_size))[0] for _index in range(index_count)]
+                triangles = [(indices[index], indices[index + 1], indices[index + 2]) for index in range(0, len(indices), 3)]
+                continue
+            if chunk == b"MROR":
+                # Observed in official/mod EPLY files as a zero-length trailer marker.
+                continue
+            raise ExportError(f"Unsupported EPLY chunk {chunk!r} in {path}.")
+
+    sections: list[MeshSection] = []
+    for material_file, first_face, face_count, two_sided, specular, subskin_bones, _flags in section_headers:
+        sections.append(
+            MeshSection(
+                material_file=material_file,
+                triangle_indices=triangles[first_face:first_face + face_count],
+                two_sided=two_sided,
+                specular_rgba=specular,
+                subskin_bones=subskin_bones,
+            )
+        )
+    if not sections and triangles:
+        sections.append(MeshSection(material_file=f"{path.stem}.mtl", triangle_indices=triangles))
+    return MeshData(file_name=path.name, vertices=vertices, sections=sections, skinned_bones=skinned_bones, vflags=vflags)
+
+
+def read_volume(path: str | Path) -> VolumeData:
+    path = Path(path)
+    with path.open("rb") as fp:
+        if _read_exact(fp, 4) != b"EVLM":
+            raise ExportError(f"{path} is not an EVLM volume.")
+        vertices: list[tuple[float, float, float]] = []
+        triangles: list[tuple[int, int, int]] = []
+        side_codes: list[int] = []
+        while True:
+            chunk = fp.read(4)
+            if not chunk:
+                break
+            if len(chunk) != 4:
+                raise ExportError(f"Truncated chunk tag in {path}.")
+            if chunk == b"VERT":
+                count = struct.unpack("<I", _read_exact(fp, 4))[0]
+                vertices = [struct.unpack("<3f", _read_exact(fp, 12)) for _index in range(count)]
+            elif chunk == b"INDX":
+                index_count = struct.unpack("<I", _read_exact(fp, 4))[0]
+                if index_count % 3:
+                    raise ExportError(f"Volume {path} index count is not divisible by three.")
+                indices = [struct.unpack("<H", _read_exact(fp, 2))[0] for _index in range(index_count)]
+                triangles = [(indices[index], indices[index + 1], indices[index + 2]) for index in range(0, len(indices), 3)]
+            elif chunk == b"SIDE":
+                side_count = struct.unpack("<I", _read_exact(fp, 4))[0]
+                side_codes = list(_read_exact(fp, side_count))
+            else:
+                raise ExportError(f"Unsupported EVLM chunk {chunk!r} in {path}.")
+    return VolumeData(file_name=path.name, entry_name=path.stem, vertices=vertices, triangles=triangles, side_codes=side_codes)
+
+
+def read_model(path: str | Path) -> ModelData:
+    path = Path(path)
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    blocks = _parse_mdl_blocks(text)
+    skeleton = next((block for block in blocks if _mdl_block_key(block) == "skeleton"), None)
+    if skeleton is None:
+        raise ExportError(f"Model file {path} does not contain a Skeleton block.")
+
+    sequences: list[SequenceDef] = []
+    basis: BoneNode | None = None
+    for child in _mdl_child_blocks(skeleton):
+        key = _mdl_block_key(child)
+        if key == "animation":
+            sequences.extend(_parse_sequence_defs(child))
+        elif key == "bone" and basis is None:
+            basis = _parse_bone_node(child)
+    if basis is None:
+        raise ExportError(f"Model file {path} does not contain a root Bone block.")
+
+    obstacles: list[Shape2DEntry] = []
+    areas: list[Shape2DEntry] = []
+    volumes: list[VolumeData] = []
+    for block in blocks:
+        key = _mdl_block_key(block)
+        if key == "obstacle":
+            obstacles.append(_parse_shape2d_entry(block, "Obstacle"))
+        elif key == "area":
+            areas.append(_parse_shape2d_entry(block, "Area"))
+        elif key == "volume":
+            volumes.append(_parse_volume_entry(block))
+
+    metadata_comments = [line[1:].strip() for line in text.splitlines() if line.lstrip().startswith(";")]
+    return ModelData(
+        file_name=path.name,
+        basis=basis,
+        sequences=sequences,
+        obstacles=obstacles,
+        areas=areas,
+        volumes=volumes,
+        source_name=str(path),
+        metadata_comments=metadata_comments,
+    )
+
+
+def _parse_mdl_blocks(text: str) -> list[MdlBlock]:
+    root: MdlBlock = []
+    stack: list[MdlBlock] = [root]
+    for token in _tokenize_mdl(text):
+        if token == "{":
+            block: MdlBlock = []
+            stack[-1].append(block)
+            stack.append(block)
+        elif token == "}":
+            if len(stack) == 1:
+                raise ExportError("Unexpected closing brace while parsing GOH text block.")
+            stack.pop()
+        else:
+            stack[-1].append(token)
+    if len(stack) != 1:
+        raise ExportError("Unclosed brace while parsing GOH text block.")
+    return [item for item in root if isinstance(item, list)]
+
+
+def _tokenize_mdl(text: str) -> list[str]:
+    tokens: list[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char == ";":
+            while index < length and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char in "{}":
+            tokens.append(char)
+            index += 1
+            continue
+        if char == '"':
+            index += 1
+            value: list[str] = []
+            while index < length:
+                current = text[index]
+                if current == "\\" and index + 1 < length:
+                    value.append(text[index + 1])
+                    index += 2
+                    continue
+                if current == '"':
+                    index += 1
+                    break
+                value.append(current)
+                index += 1
+            tokens.append("".join(value))
+            continue
+        start = index
+        while index < length and not text[index].isspace() and text[index] not in '{}";':
+            index += 1
+        tokens.append(text[start:index])
+    return tokens
+
+
+def _mdl_block_key(block: MdlBlock) -> str:
+    tokens = _mdl_block_tokens(block)
+    return tokens[0].lower() if tokens else ""
+
+
+def _mdl_block_tokens(block: MdlBlock) -> list[str]:
+    return [str(item) for item in block if not isinstance(item, list)]
+
+
+def _mdl_child_blocks(block: MdlBlock) -> list[MdlBlock]:
+    return [item for item in block if isinstance(item, list)]
+
+
+def _mdl_inline_block(block: MdlBlock) -> str:
+    parts: list[str] = []
+    for item in block:
+        if isinstance(item, list):
+            parts.append("{" + _mdl_inline_block(item) + "}")
+        else:
+            text = str(item)
+            if any(char.isspace() for char in text):
+                text = f'"{text}"'
+            parts.append(text)
+    return " ".join(parts)
+
+
+def _float_tokens(tokens: Iterable[str]) -> list[float]:
+    values: list[float] = []
+    for token in tokens:
+        try:
+            values.append(float(token))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _parse_sequence_defs(animation_block: MdlBlock) -> list[SequenceDef]:
+    sequences: list[SequenceDef] = []
+    for child in _mdl_child_blocks(animation_block):
+        if _mdl_block_key(child) != "sequence":
+            continue
+        tokens = _mdl_block_tokens(child)
+        if len(tokens) < 2:
+            continue
+        sequence = SequenceDef(name=tokens[1])
+        for subblock in _mdl_child_blocks(child):
+            key = _mdl_block_key(subblock)
+            sub_tokens = _mdl_block_tokens(subblock)
+            if key == "file" and len(sub_tokens) >= 2:
+                sequence.file_name = sub_tokens[1]
+            elif key == "speed" and len(sub_tokens) >= 2:
+                sequence.speed = _float_tokens(sub_tokens[1:2])[0] if _float_tokens(sub_tokens[1:2]) else sequence.speed
+            elif key == "smooth" and len(sub_tokens) >= 2:
+                sequence.smooth = _float_tokens(sub_tokens[1:2])[0] if _float_tokens(sub_tokens[1:2]) else sequence.smooth
+            elif key == "resume":
+                sequence.resume = True
+            elif key == "autostart":
+                sequence.autostart = True
+            elif key == "store":
+                sequence.store = True
+        sequences.append(sequence)
+    return sequences
+
+
+def _parse_bone_node(block: MdlBlock) -> BoneNode:
+    tokens = _mdl_block_tokens(block)
+    if len(tokens) < 2:
+        raise ExportError("Bone block is missing a name.")
+    bone_type: str | None = None
+    name_index = 1
+    if len(tokens) >= 3 and tokens[1].lower() in {"revolute", "prizmatic", "prismatic", "socket", "bone"}:
+        bone_type = tokens[1]
+        name_index = 2
+    node = BoneNode(name=tokens[name_index], bone_type=bone_type)
+    for child in _mdl_child_blocks(block):
+        key = _mdl_block_key(child)
+        child_tokens = _mdl_block_tokens(child)
+        if key in {"position", "orientation", "matrix34"}:
+            node.matrix = _parse_transform_rows(child)
+        elif key == "parameters" and len(child_tokens) >= 2:
+            node.parameters = child_tokens[1]
+        elif key == "animation":
+            node.sequences.extend(_parse_sequence_defs(child))
+        elif key == "limits":
+            node.limits = tuple(_float_tokens(child_tokens[1:]))
+        elif key in {"speed", "speed2"}:
+            values = _float_tokens(child_tokens[1:])
+            if values:
+                node.speed = values[0]
+                node.speed_uses_speed2 = key == "speed2"
+        elif key == "terminator":
+            node.terminator = True
+        elif key == "visibility":
+            values = _float_tokens(child_tokens[1:])
+            if values:
+                node.visibility = int(values[0])
+        elif key == "color" and len(child_tokens) >= 2:
+            try:
+                node.color_rgba = uint_to_rgba(int(child_tokens[1], 0))
+            except ValueError:
+                node.color_rgba = None
+        elif key == "volumeview":
+            node.mesh_views.append(_parse_mesh_view(child))
+        elif key == "lodview":
+            for lod_child in _mdl_child_blocks(child):
+                lod_key = _mdl_block_key(lod_child)
+                if lod_key == "volumeview":
+                    node.mesh_views.append(_parse_mesh_view(lod_child))
+                elif lod_key == "off":
+                    node.lod_off = True
+        elif key == "bone":
+            node.children.append(_parse_bone_node(child))
+    if node.mesh_views:
+        first_view = node.mesh_views[0]
+        node.volume_view = first_view.file_name
+        node.volume_flags = first_view.flags
+        node.layer = first_view.layer
+    return node
+
+
+def _parse_mesh_view(block: MdlBlock) -> MeshViewDef:
+    tokens = _mdl_block_tokens(block)
+    file_name = tokens[1] if len(tokens) >= 2 else ""
+    flags: list[str] = []
+    layer: int | str | None = None
+    for child in _mdl_child_blocks(block):
+        key = _mdl_block_key(child)
+        child_tokens = _mdl_block_tokens(child)
+        if key == "layer" and len(child_tokens) >= 2:
+            try:
+                layer = int(float(child_tokens[1]))
+            except ValueError:
+                layer = child_tokens[1]
+        elif child_tokens:
+            flags.append(child_tokens[0])
+    return MeshViewDef(file_name=file_name, flags=tuple(flags), layer=layer)
+
+
+def _parse_transform_rows(block: MdlBlock) -> tuple[tuple[float, float, float], ...]:
+    tokens = _mdl_block_tokens(block)
+    key = tokens[0].lower() if tokens else ""
+    values = _float_tokens(tokens[1:])
+    identity = (
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+        (0.0, 0.0, 0.0),
+    )
+    if key == "position" and len(values) >= 3:
+        return (identity[0], identity[1], identity[2], (values[0], values[1], values[2]))
+    if key == "orientation" and len(values) >= 9:
+        return (
+            (values[0], values[1], values[2]),
+            (values[3], values[4], values[5]),
+            (values[6], values[7], values[8]),
+            identity[3],
+        )
+    if key == "matrix34" and len(values) >= 12:
+        return (
+            (values[0], values[1], values[2]),
+            (values[3], values[4], values[5]),
+            (values[6], values[7], values[8]),
+            (values[9], values[10], values[11]),
+        )
+    return identity
+
+
+def _parse_volume_entry(block: MdlBlock) -> VolumeData:
+    tokens = _mdl_block_tokens(block)
+    entry_name = tokens[1] if len(tokens) >= 2 else "volume"
+    volume = VolumeData(file_name=None, entry_name=entry_name)
+    for child in _mdl_child_blocks(block):
+        key = _mdl_block_key(child)
+        child_tokens = _mdl_block_tokens(child)
+        if key == "polyhedron" and len(child_tokens) >= 2:
+            volume.volume_kind = "polyhedron"
+            volume.file_name = child_tokens[1]
+        elif key == "box":
+            values = _float_tokens(child_tokens[1:])
+            if len(values) >= 3:
+                volume.volume_kind = "box"
+                volume.box_size = (values[0], values[1], values[2])
+        elif key == "sphere":
+            values = _float_tokens(child_tokens[1:])
+            if values:
+                volume.volume_kind = "sphere"
+                volume.sphere_radius = values[0]
+        elif key == "cylinder":
+            values = _float_tokens(child_tokens[1:])
+            if len(values) >= 2:
+                volume.volume_kind = "cylinder"
+                volume.cylinder_radius = values[0]
+                volume.cylinder_length = values[1]
+        elif key == "bone" and len(child_tokens) >= 2:
+            volume.bone_name = child_tokens[1]
+        elif key == "component" and len(child_tokens) >= 2:
+            volume.component = child_tokens[1]
+        elif key == "tags" and len(child_tokens) >= 2:
+            volume.tags = child_tokens[1]
+        elif key == "density":
+            values = _float_tokens(child_tokens[1:])
+            if values:
+                volume.density = values[0]
+        elif key == "thickness":
+            volume.thickness.update(_parse_thickness(child))
+        elif key in {"position", "orientation", "matrix34"}:
+            volume.matrix = _parse_transform_rows(child)
+            volume.transform_block = key
+    return volume
+
+
+def _parse_thickness(block: MdlBlock) -> dict[str, tuple[float, ...]]:
+    result: dict[str, tuple[float, ...]] = {}
+    tokens = _mdl_block_tokens(block)
+    common = _float_tokens(tokens[1:])
+    if common:
+        result["common"] = tuple(common[:2])
+    side_map = {
+        "front": "front",
+        "rear": "rear",
+        "right": "right",
+        "left": "left",
+        "top": "top",
+        "bottom": "bottom",
+    }
+    for child in _mdl_child_blocks(block):
+        key = side_map.get(_mdl_block_key(child))
+        if not key:
+            continue
+        values = _float_tokens(_mdl_block_tokens(child)[1:])
+        if values:
+            result[key] = tuple(values[:2])
+    return result
+
+
+def _parse_shape2d_entry(block: MdlBlock, block_type: str) -> Shape2DEntry:
+    tokens = _mdl_block_tokens(block)
+    entry = Shape2DEntry(entry_name=tokens[1] if len(tokens) >= 2 else block_type.lower(), block_type=block_type)
+    for child in _mdl_child_blocks(block):
+        key = _mdl_block_key(child)
+        child_tokens = _mdl_block_tokens(child)
+        if key in {"obb2", "circle2", "polygon2"}:
+            entry.shape_type = child_tokens[0] if child_tokens else key
+            for shape_child in _mdl_child_blocks(child):
+                shape_key = _mdl_block_key(shape_child)
+                values = _float_tokens(_mdl_block_tokens(shape_child)[1:])
+                if shape_key == "radius" and values:
+                    entry.radius = values[0]
+                elif shape_key == "vertex" and len(values) >= 2:
+                    entry.vertices.append((values[0], values[1]))
+                elif shape_key == "center" and len(values) >= 2:
+                    entry.center = (values[0], values[1])
+                elif shape_key == "extent" and len(values) >= 2:
+                    entry.extent = (values[0], values[1])
+                elif shape_key == "axis" and len(values) >= 2:
+                    entry.axis = (values[0], values[1])
+        elif key == "rotate":
+            entry.rotate = True
+        elif key == "tags" and len(child_tokens) >= 2:
+            entry.tags = child_tokens[1]
+    return entry
+
+
+def _read_prefixed_string(fp: BinaryIO) -> str:
+    length = struct.unpack("<B", _read_exact(fp, 1))[0]
+    return _read_exact(fp, length).decode("utf-8", errors="replace")
+
+
 def _write_mesh_animation_chunk(
     fp: BinaryIO,
     mesh_state: MeshAnimationState,
@@ -1184,6 +1763,16 @@ def classify_triangle_sides(
 def rgba_to_uint(color: tuple[int, int, int, int]) -> int:
     r, g, b, a = [max(0, min(255, int(v))) for v in color]
     return r | (g << 8) | (b << 16) | (a << 24)
+
+
+def uint_to_rgba(value: int) -> tuple[int, int, int, int]:
+    raw = int(value) & 0xFFFFFFFF
+    return (
+        raw & 0xFF,
+        (raw >> 8) & 0xFF,
+        (raw >> 16) & 0xFF,
+        (raw >> 24) & 0xFF,
+    )
 
 
 def sanitized_file_stem(text: str) -> str:
