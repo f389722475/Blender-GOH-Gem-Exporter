@@ -5,6 +5,7 @@ import shutil
 import sys
 
 import bpy
+from mathutils import Matrix
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ if str(ADDON_PARENT) not in sys.path:
     sys.path.insert(0, str(ADDON_PARENT))
 
 import blender_goh_gem_exporter as addon  # noqa: E402
+from blender_goh_gem_exporter import blender_exporter as exporter_module  # noqa: E402
 from blender_goh_gem_exporter.goh_core import read_animation  # noqa: E402
 
 
@@ -103,23 +105,71 @@ def main() -> None:
             cube.data.shape_keys.animation_data.action.name = "move_body"
 
         material = bpy.data.materials.new(name="BodyMaterial")
+        material.use_nodes = True
+        for image_name in ("runtime_body_c", "runtime_body_n_n", "runtime_body_n_s"):
+            image = bpy.data.images.new(name=image_name, width=1, height=1)
+            image_node = material.node_tree.nodes.new(type="ShaderNodeTexImage")
+            image_node.image = image
         material["goh_lightmap"] = "body_mask"
         material["goh_lightmap_options"] = "MipMap 1"
         material["goh_parallax_scale"] = 1.25
         material["goh_full_specular"] = True
         cube.data.materials.clear()
         cube.data.materials.append(material)
-        cube["goh_lod_files"] = "body.ply;body_lod1.ply"
-        cube["goh_lod_off"] = True
 
         tool_settings = scene.goh_tool_settings
         tool_settings.texture_scope = "SELECTED"
+        tool_settings.material_overwrite = False
+        autofill_result = bpy.ops.scene.goh_autofill_materials()
+        if "FINISHED" not in autofill_result:
+            raise RuntimeError(f"Material auto-fill failed: {autofill_result}")
+        if material.get("goh_diffuse") != "runtime_body_c":
+            raise RuntimeError("Material auto-fill did not infer goh_diffuse.")
+        if material.get("goh_bump") != "runtime_body_n_n" or material.get("goh_specular") != "runtime_body_n_s":
+            raise RuntimeError("Material auto-fill did not infer bump/specular textures.")
+
+        tool_settings.lod_levels = 1
+        tool_settings.lod_mark_off = True
+        lod_result = bpy.ops.object.goh_assign_lod_files()
+        if "FINISHED" not in lod_result:
+            raise RuntimeError(f"LOD assignment failed: {lod_result}")
+        if cube.get("goh_lod_files") != "body.ply;body_lod1.ply" or not cube.get("goh_lod_off"):
+            raise RuntimeError("LOD assignment did not write the expected GOH LOD properties.")
+
         texture_result = bpy.ops.scene.goh_report_textures()
         if "FINISHED" not in texture_result:
             raise RuntimeError(f"Texture report failed: {texture_result}")
         texture_report = bpy.data.texts.get("GOH_Texture_Report.txt")
         if texture_report is None or "BodyMaterial: body_mask" not in texture_report.as_string():
             raise RuntimeError("Texture report did not capture the expected GOH texture reference.")
+
+        bpy.ops.object.select_all(action="DESELECT")
+        cube.select_set(True)
+        bpy.context.view_layer.objects.active = cube
+        tool_settings.helper_volume_kind = "BOX"
+        bounds_result = bpy.ops.object.goh_create_volume_from_bounds()
+        if "FINISHED" not in bounds_result:
+            raise RuntimeError(f"Volume From Bounds failed: {bounds_result}")
+        bounds_helper = bpy.context.active_object
+        if bounds_helper is None or bounds_helper.get("goh_volume_kind") != "box" or bounds_helper.get("goh_volume_bone") != "body":
+            raise RuntimeError("Volume From Bounds did not create the expected GOH helper.")
+        bpy.data.objects.remove(bounds_helper, do_unlink=True)
+        bpy.ops.object.select_all(action="DESELECT")
+        cube.select_set(True)
+        bpy.context.view_layer.objects.active = cube
+        scene.cursor.location = cube.matrix_world @ cube.data.vertices[0].co
+        tool_settings.physics_impact_clip_name = "armor_ripple"
+        tool_settings.physics_ripple_amplitude = 0.015
+        tool_settings.physics_ripple_radius = 1.0
+        tool_settings.physics_ripple_waves = 2
+        tool_settings.physics_create_nla_clips = True
+        ripple_result = bpy.ops.object.goh_create_armor_ripple()
+        if "FINISHED" not in ripple_result:
+            raise RuntimeError(f"Armor ripple generation failed: {ripple_result}")
+        if cube.data.shape_keys is None or not any(key.name.startswith("GOH_Ripple_armor_ripple_") for key in cube.data.shape_keys.key_blocks):
+            raise RuntimeError("Armor ripple did not create expected shape keys.")
+        if not cube.get("goh_force_mesh_animation"):
+            raise RuntimeError("Armor ripple did not force mesh animation sampling.")
 
         scene.frame_set(1)
         bpy.ops.mesh.primitive_cube_add(location=(3.0, 0.0, 0.0))
@@ -144,6 +194,230 @@ def main() -> None:
 
         bpy.ops.object.empty_add(type="PLAIN_AXES", location=(2.0, 3.0, 0.0))
         legacy_handle = bpy.context.active_object
+
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(3.0, 3.0, 0.0))
+        recoil_dummy = bpy.context.active_object
+        bpy.ops.object.select_all(action="DESELECT")
+        recoil_dummy.select_set(True)
+        bpy.context.view_layer.objects.active = recoil_dummy
+        tool_settings.recoil_axis = "NEG_Y"
+        tool_settings.recoil_distance = 0.2
+        tool_settings.recoil_frames = 8
+        recoil_result = bpy.ops.object.goh_create_recoil_action()
+        if "FINISHED" not in recoil_result:
+            raise RuntimeError(f"Recoil action generation failed: {recoil_result}")
+        if recoil_dummy.animation_data is None or recoil_dummy.animation_data.action is None:
+            raise RuntimeError("Recoil action generation did not create an action.")
+        if recoil_dummy.get("goh_sequence_name") != "recoil":
+            raise RuntimeError("Recoil action generation did not write GOH sequence metadata.")
+        bpy.data.objects.remove(recoil_dummy, do_unlink=True)
+
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(4.0, 3.0, 0.0))
+        recoil_source = bpy.context.active_object
+        recoil_source.name = "Gun"
+        recoil_source["goh_bone_name"] = "gun"
+        recoil_source["goh_sequence_name"] = "fire"
+        recoil_source["goh_sequence_file"] = "fire"
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(4.0, 2.4, 0.0))
+        recoil_body = bpy.context.active_object
+        recoil_body.name = "BodySpring"
+        recoil_body["goh_bone_name"] = "body"
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(4.0, 3.6, 0.0))
+        recoil_antenna = bpy.context.active_object
+        recoil_antenna.name = "Antenna"
+        recoil_antenna["goh_bone_name"] = "antenna"
+
+        bpy.ops.object.select_all(action="DESELECT")
+        recoil_source.select_set(True)
+        recoil_body.select_set(True)
+        bpy.context.view_layer.objects.active = recoil_source
+        tool_settings.physics_link_role = "BODY_SPRING"
+        tool_settings.physics_link_weight = 1.0
+        tool_settings.physics_link_delay = 1
+        link_result = bpy.ops.object.goh_assign_physics_link()
+        if "FINISHED" not in link_result:
+            raise RuntimeError(f"Physics link assignment failed: {link_result}")
+        if recoil_body.get("goh_physics_source") != "gun" or recoil_body.get("goh_physics_role") != "BODY_SPRING":
+            raise RuntimeError("Physics link assignment did not store body spring metadata.")
+        if abs(float(recoil_body.get("goh_physics_weight", 0.0)) - exporter_module._physics_role_defaults("BODY_SPRING")[0]) > 1e-6:
+            raise RuntimeError("Physics link assignment did not auto-store body spring role defaults.")
+        if float(recoil_body.get("goh_physics_frequency", 0.0)) <= 0.0:
+            raise RuntimeError("Physics link assignment did not store role-specific frequency.")
+
+        bpy.ops.object.select_all(action="DESELECT")
+        recoil_source.select_set(True)
+        recoil_antenna.select_set(True)
+        bpy.context.view_layer.objects.active = recoil_source
+        tool_settings.physics_link_role = "ANTENNA_WHIP"
+        tool_settings.physics_link_weight = 0.8
+        tool_settings.physics_link_delay = 2
+        tool_settings.physics_link_jitter = 0.25
+        link_result = bpy.ops.object.goh_assign_physics_link()
+        if "FINISHED" not in link_result:
+            raise RuntimeError(f"Physics antenna link assignment failed: {link_result}")
+        if recoil_antenna.get("goh_physics_role") != "ANTENNA_WHIP":
+            raise RuntimeError("Physics link assignment did not store antenna role metadata.")
+        if abs(float(recoil_antenna.get("goh_physics_rotation", 0.0)) - exporter_module._physics_role_defaults("ANTENNA_WHIP")[3]) > 1e-6:
+            raise RuntimeError("Physics link assignment did not auto-store antenna rotation defaults.")
+
+        bpy.ops.object.select_all(action="DESELECT")
+        recoil_source.select_set(True)
+        bpy.context.view_layer.objects.active = recoil_source
+        tool_settings.recoil_frames = 10
+        tool_settings.recoil_distance = 0.25
+        tool_settings.recoil_axis = "NEG_Y"
+        tool_settings.physics_power = 1.25
+        tool_settings.physics_duration_scale = 1.2
+        tool_settings.physics_include_scene_links = True
+        clip_frames = exporter_module._physics_max_clip_frames(tool_settings, (recoil_body, recoil_antenna), tool_settings.recoil_frames)
+        if clip_frames <= tool_settings.recoil_frames:
+            raise RuntimeError("Physics duration scale did not extend linked recoil clip length.")
+        stale_link_action = bpy.data.actions.new("stale_recoil_body")
+        stale_link_action["goh_sequence_name"] = "recoil"
+        stale_link_action["goh_sequence_file"] = "recoil"
+        recoil_body.animation_data_create()
+        recoil_body.animation_data.action = stale_link_action
+        linked_recoil_result = bpy.ops.object.goh_bake_linked_recoil()
+        if "FINISHED" not in linked_recoil_result:
+            raise RuntimeError(f"Linked recoil bake failed: {linked_recoil_result}")
+        for baked in (recoil_source, recoil_body, recoil_antenna):
+            if baked.animation_data is None or baked.animation_data.action is None:
+                raise RuntimeError(f"Linked recoil bake did not create an action on {baked.name}.")
+            if baked.animation_data.action.get("goh_sequence_name") != "fire" or baked.animation_data.action.get("goh_sequence_file") != "fire":
+                raise RuntimeError("Linked recoil bake did not preserve/inherit the requested fire sequence metadata.")
+        scene.frame_set(1)
+        if (
+            abs(recoil_body.location.x - 4.0) > 1e-6
+            or abs(recoil_body.location.y - 2.4) > 1e-6
+            or abs(recoil_body.location.z) > 1e-6
+        ):
+            raise RuntimeError("Linked recoil should keep delayed linked parts at rest on the first frame.")
+        linked_body_keyframes = [
+            keyframe
+            for fcurve in exporter_module._action_fcurves(recoil_body.animation_data.action)
+            for keyframe in fcurve.keyframe_points
+        ]
+        if not linked_body_keyframes or any(keyframe.interpolation != "LINEAR" for keyframe in linked_body_keyframes):
+            raise RuntimeError("Linked recoil should preserve sampled physics keys with linear interpolation.")
+
+        tool_settings.physics_link_role = "BODY_SPRING"
+        defaults_result = bpy.ops.object.goh_load_physics_defaults()
+        if "FINISHED" not in defaults_result:
+            raise RuntimeError(f"Physics defaults load failed: {defaults_result}")
+        if tool_settings.physics_link_frequency <= 0.0 or tool_settings.physics_link_damping <= 0.0:
+            raise RuntimeError("Physics defaults did not populate spring tuning fields.")
+        role_profiles = {}
+        for role_name in (
+            "BODY_SPRING",
+            "ANTENNA_WHIP",
+            "ACCESSORY_JITTER",
+            "FOLLOWER",
+            "SUSPENSION_BOUNCE",
+            "TRACK_RUMBLE",
+        ):
+            tool_settings.physics_link_role = role_name
+            defaults_result = bpy.ops.object.goh_load_physics_defaults()
+            if "FINISHED" not in defaults_result:
+                raise RuntimeError(f"Physics defaults load failed for {role_name}: {defaults_result}")
+            defaults = exporter_module._physics_role_defaults(role_name)
+            if abs(tool_settings.physics_link_weight - defaults[0]) > 1e-6:
+                raise RuntimeError(f"Physics defaults did not set role-specific weight for {role_name}.")
+            role_profiles[role_name] = tuple(
+                round(value, 4)
+                for value in exporter_module._physics_role_motion(role_name, 0.28, defaults[1], defaults[2])
+            )
+            end_profile = exporter_module._physics_role_motion(role_name, 1.0, defaults[1], defaults[2])
+            if any(abs(value) > 1e-5 for value in end_profile[:4]):
+                raise RuntimeError(f"Physics role motion does not settle at the end for {role_name}.")
+        if len(set(role_profiles.values())) != len(role_profiles):
+            raise RuntimeError("Physics role motion profiles are not distinct enough.")
+        if role_profiles["BODY_SPRING"][0] <= role_profiles["FOLLOWER"][0]:
+            raise RuntimeError("Body Spring should have a stronger longitudinal recoil than Follower.")
+        if abs(role_profiles["ANTENNA_WHIP"][3]) <= abs(role_profiles["FOLLOWER"][3]):
+            raise RuntimeError("Antenna Whip should have a stronger rotation response than Follower.")
+
+        def sign_changes(values: list[float], threshold: float) -> int:
+            signs: list[int] = []
+            for value in values:
+                if abs(value) <= threshold:
+                    continue
+                sign = 1 if value > 0.0 else -1
+                if not signs or signs[-1] != sign:
+                    signs.append(sign)
+            return max(0, len(signs) - 1)
+
+        body_defaults = exporter_module._physics_role_defaults("BODY_SPRING")
+        body_samples = [
+            exporter_module._physics_role_motion("BODY_SPRING", index / 48.0, body_defaults[1], body_defaults[2])
+            for index in range(1, 48)
+        ]
+        body_rotation = [sample[3] for sample in body_samples]
+        body_side = [sample[1] for sample in body_samples]
+        if sign_changes(body_rotation, 0.025) < 2:
+            raise RuntimeError("Body Spring should produce multiple damped rotation reversals.")
+        if sign_changes(body_side, 0.008) < 1:
+            raise RuntimeError("Body Spring should include lateral pendulum follow-through.")
+        early_rotation = max(abs(value) for value in body_rotation[:18])
+        late_rotation = max(abs(value) for value in body_rotation[30:])
+        if late_rotation >= early_rotation:
+            raise RuntimeError("Body Spring rotation should decay over time.")
+
+        duration_profiles = {
+            role_name: exporter_module._physics_role_duration_default(role_name)
+            for role_name in role_profiles
+        }
+        if not (
+            duration_profiles["ANTENNA_WHIP"]
+            > duration_profiles["SUSPENSION_BOUNCE"]
+            > duration_profiles["BODY_SPRING"]
+            > duration_profiles["FOLLOWER"]
+            > duration_profiles["ACCESSORY_JITTER"]
+            > duration_profiles["TRACK_RUMBLE"]
+        ):
+            raise RuntimeError("Physics role duration defaults are not ordered from whip tail to short rumble.")
+
+        bpy.ops.object.select_all(action="DESELECT")
+        recoil_source.select_set(True)
+        bpy.context.view_layer.objects.active = recoil_source
+        tool_settings.physics_direction_set = "FOUR_FIRE"
+        tool_settings.physics_clip_prefix = "fire"
+        tool_settings.physics_create_nla_clips = True
+        directional_result = bpy.ops.object.goh_bake_directional_recoil_set()
+        if "FINISHED" not in directional_result:
+            raise RuntimeError(f"Directional recoil bake failed: {directional_result}")
+        source_tracks = list(recoil_source.animation_data.nla_tracks)
+        if len(source_tracks) < 4 or not any(track.name.startswith("GOH Physics fire_front") for track in source_tracks):
+            raise RuntimeError("Directional recoil bake did not create expected NLA strips on the source.")
+        if recoil_body.animation_data is None or len(recoil_body.animation_data.nla_tracks) < 4:
+            raise RuntimeError("Directional recoil bake did not create linked body NLA strips.")
+
+        bpy.ops.object.select_all(action="DESELECT")
+        recoil_body.select_set(True)
+        bpy.context.view_layer.objects.active = recoil_body
+        tool_settings.physics_impact_clip_name = "hit_body"
+        impact_result = bpy.ops.object.goh_bake_impact_response()
+        if "FINISHED" not in impact_result:
+            raise RuntimeError(f"Impact response bake failed: {impact_result}")
+        if recoil_body.animation_data is None or recoil_body.animation_data.action is None:
+            raise RuntimeError("Impact response did not create an active action.")
+        if recoil_body.animation_data.action.get("goh_sequence_name") != "hit_body":
+            raise RuntimeError("Impact response did not write sequence metadata.")
+
+        bpy.ops.object.select_all(action="DESELECT")
+        for obj in (recoil_source, recoil_body, recoil_antenna):
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = recoil_source
+        tool_settings.physics_clear_actions = True
+        clear_result = bpy.ops.object.goh_clear_physics_links()
+        if "FINISHED" not in clear_result:
+            raise RuntimeError(f"Physics clear failed: {clear_result}")
+        if "goh_physics_source" in recoil_body:
+            raise RuntimeError("Physics clear did not remove stored link metadata.")
+        if recoil_source.animation_data is not None and any(track.name.startswith("GOH Physics") for track in recoil_source.animation_data.nla_tracks):
+            raise RuntimeError("Physics clear did not remove GOH physics NLA tracks.")
+        bpy.data.objects.remove(recoil_source, do_unlink=True)
+        bpy.data.objects.remove(recoil_body, do_unlink=True)
+        bpy.data.objects.remove(recoil_antenna, do_unlink=True)
 
         bpy.ops.object.select_all(action="DESELECT")
         volume.select_set(True)
@@ -275,6 +549,14 @@ def main() -> None:
         legacy_mesh.select_set(True)
         legacy_handle.select_set(True)
 
+        tool_settings.validation_scope = "SELECTED"
+        validation_result = bpy.ops.scene.goh_validate_scene()
+        if "FINISHED" not in validation_result:
+            raise RuntimeError(f"GOH validation failed unexpectedly: {validation_result}")
+        validation_report = bpy.data.texts.get("GOH_Validation_Report.txt")
+        if validation_report is None or "GOH Validation Report" not in validation_report.as_string():
+            raise RuntimeError("GOH validation did not create a report text block.")
+
         result = bpy.ops.export_scene.goh_model(
             filepath=str(output_file),
             selection_only=True,
@@ -326,16 +608,72 @@ def main() -> None:
         mtl_text = material_files[0].read_text(encoding="utf-8")
         if '{lightmap "body_mask" {MipMap 1}}' not in mtl_text or "{parallax_scale 1.25}" not in mtl_text:
             raise RuntimeError("Extended material parameters were not written into the .mtl file.")
+        import_result = bpy.ops.import_scene.goh_model(
+            filepath=str(output_file),
+            axis_mode="NONE",
+            scale_factor=20.0,
+            flip_v=True,
+            import_materials=True,
+            load_textures=False,
+            import_volumes=True,
+            import_lod0_only=True,
+        )
+        if "FINISHED" not in import_result:
+            raise RuntimeError(f"Model import failed: {import_result}")
+        imported_objects = [
+            obj for obj in bpy.data.objects
+            if str(obj.get("goh_source_mdl") or "") == str(output_file)
+        ]
+        if not imported_objects:
+            raise RuntimeError("Model import did not create tagged imported objects.")
+        imported_body = next((obj for obj in imported_objects if obj.get("goh_bone_name") == "body" and obj.type == "MESH"), None)
+        if imported_body is None or len(imported_body.data.vertices) == 0:
+            raise RuntimeError("Model import did not rebuild the body visual mesh.")
+        if not imported_body.material_slots or imported_body.material_slots[0].material is None:
+            raise RuntimeError("Model import did not attach a material to the body mesh.")
+        imported_volumes = [obj for obj in imported_objects if obj.get("goh_is_volume")]
+        if not any(obj.get("goh_volume_kind") == "box" for obj in imported_volumes):
+            raise RuntimeError("Model import did not rebuild primitive box volumes.")
+        if not any(obj.get("goh_volume_kind") == "sphere" for obj in imported_volumes):
+            raise RuntimeError("Model import did not rebuild primitive sphere volumes.")
+        if imported_body.get("goh_import_axis_mode") != "NONE":
+            raise RuntimeError("Model import did not store axis metadata for animation auto-matching.")
+        if abs(float(imported_body.get("goh_import_scale_factor", 0.0)) - 20.0) > 1e-6:
+            raise RuntimeError("Model import did not store scale metadata for animation auto-matching.")
+        bpy.ops.object.select_all(action="DESELECT")
+        imported_body.select_set(True)
+        bpy.context.view_layer.objects.active = imported_body
+        model_anm_result = bpy.ops.import_scene.goh_anm(
+            filepath=str(output_dir / "body.anm"),
+            axis_mode="AUTO",
+            frame_start=40,
+        )
+        if "FINISHED" not in model_anm_result:
+            raise RuntimeError(f"Imported-model animation failed: {model_anm_result}")
+        scene.frame_set(40)
+        imported_start = imported_body.location.copy()
+        scene.frame_set(49)
+        imported_end = imported_body.location.copy()
+        imported_delta = imported_end - imported_start
+        if abs(imported_delta.x - 2.0) > 0.05 or abs(imported_delta.y) > 0.05 or abs(imported_delta.z) > 0.05:
+            raise RuntimeError(f"Imported-model animation axis mismatch: delta={tuple(imported_delta)}")
+        for imported in imported_objects:
+            bpy.data.objects.remove(imported, do_unlink=True)
         anm_bytes = (output_dir / "body.anm").read_bytes()
         if anm_bytes[:4] != b"EANM":
             raise RuntimeError("body.anm does not look like a GOH animation file.")
         if int.from_bytes(anm_bytes[4:8], "little") != 0x00060000:
             raise RuntimeError("body.anm was expected to default to FRM2 / 0x00060000.")
         parsed = read_animation(output_dir / "body.anm")
+        if "basis" in parsed.bone_names:
+            raise RuntimeError("Object-mode ANM export should not override the static GOH basis transform.")
         if not any(frame for frame in parsed.mesh_frames):
             raise RuntimeError("body.anm did not contain any mesh animation chunks.")
 
         cube.animation_data_clear()
+        bpy.ops.object.select_all(action="DESELECT")
+        cube.select_set(True)
+        bpy.context.view_layer.objects.active = cube
         result = bpy.ops.import_scene.goh_anm(
             filepath=str(output_dir / "body.anm"),
             axis_mode="NONE",
@@ -350,6 +688,51 @@ def main() -> None:
         imported_keys = [key.name for key in cube.data.shape_keys.key_blocks if key.name.startswith("GOH_body_body_")]
         if len(imported_keys) < 2:
             raise RuntimeError("Import did not rebuild mesh animation shape keys.")
+
+        basis_probe_dir = output_dir / "basis_roundtrip"
+        basis_probe_dir.mkdir(parents=True, exist_ok=True)
+        basis_probe_mesh = bpy.data.meshes.new("basis_probe_mesh")
+        basis_probe_mesh.from_pydata([(0.0, 0.0, 0.0), (0.25, 0.0, 0.0), (0.0, 0.25, 0.0)], [], [(0, 1, 2)])
+        basis_probe_mesh.update()
+        basis_probe_basis = bpy.data.objects.new("basis", None)
+        basis_probe_basis.empty_display_type = "PLAIN_AXES"
+        scene.collection.objects.link(basis_probe_basis)
+        basis_probe_basis.matrix_world = Matrix(
+            (
+                (1.0, 0.0, 0.0, 0.0),
+                (0.0, -1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            )
+        )
+        basis_probe_child = bpy.data.objects.new("BasisProbeBody", basis_probe_mesh)
+        scene.collection.objects.link(basis_probe_child)
+        basis_probe_child.parent = basis_probe_basis
+        basis_probe_child.matrix_parent_inverse = Matrix.Identity(4)
+        basis_probe_child.matrix_local = Matrix.Translation((1.0, 2.0, 3.0))
+        basis_probe_child["goh_bone_name"] = "body"
+        bpy.ops.object.select_all(action="DESELECT")
+        basis_probe_basis.select_set(True)
+        basis_probe_child.select_set(True)
+        bpy.context.view_layer.objects.active = basis_probe_child
+        basis_probe_file = basis_probe_dir / "basis_probe.mdl"
+        basis_probe_result = bpy.ops.export_scene.goh_model(
+            filepath=str(basis_probe_file),
+            selection_only=True,
+            include_hidden=True,
+            axis_mode="NONE",
+            scale_factor=20.0,
+            export_animations=False,
+        )
+        if "FINISHED" not in basis_probe_result:
+            raise RuntimeError(f"Basis helper round-trip export failed: {basis_probe_result}")
+        basis_probe_text = basis_probe_file.read_text(encoding="utf-8")
+        if "{Position 20\t40\t60}" not in basis_probe_text:
+            raise RuntimeError("Basis helper round-trip export baked the GOH basis orientation into the child bone.")
+        bpy.data.objects.remove(basis_probe_child, do_unlink=True)
+        bpy.data.objects.remove(basis_probe_basis, do_unlink=True)
+        if basis_probe_mesh.users == 0:
+            bpy.data.meshes.remove(basis_probe_mesh)
 
         print("blender runtime test passed")
         for path in expected:

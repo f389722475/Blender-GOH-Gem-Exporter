@@ -29,6 +29,10 @@ from goh_core import (  # noqa: E402
     classify_triangle_sides,
     encode_mesh_vertex_stream,
     read_animation,
+    read_material,
+    read_mesh,
+    read_model,
+    read_volume,
     write_animation,
     write_export_bundle,
 )
@@ -470,6 +474,32 @@ def main() -> None:
         assert "{parallax_scale 1.5}" in mtl_text
         assert "{full_specular}" in mtl_text
         assert mesh_flags & 0x4000
+
+        parsed_model = read_model(mdl)
+        assert parsed_model.file_name == "demo.mdl"
+        assert parsed_model.basis.name == "basis"
+        assert parsed_model.basis.children[0].name == "body"
+        assert parsed_model.basis.children[0].mesh_views[0].file_name == "body.ply"
+        assert len(parsed_model.volumes) >= 5
+        assert any(volume.volume_kind == "box" and volume.box_size == (2.0, 3.0, 4.0) for volume in parsed_model.volumes)
+        assert any(volume.volume_kind == "sphere" and volume.sphere_radius == 1.75 for volume in parsed_model.volumes)
+        parsed_mesh = read_mesh(ply)
+        assert parsed_mesh.file_name == "body.ply"
+        assert len(parsed_mesh.vertices) == 4
+        assert parsed_mesh.sections[0].material_file == "body.mtl"
+        mror_ply = output_dir / "body_mror.ply"
+        mror_ply.write_bytes(ply.read_bytes() + b"MROR")
+        parsed_mror_mesh = read_mesh(mror_ply)
+        assert len(parsed_mror_mesh.vertices) == len(parsed_mesh.vertices)
+        assert len(parsed_mror_mesh.sections) == len(parsed_mesh.sections)
+        parsed_material = read_material(mtl)
+        assert parsed_material.diffuse_texture == "test_body_c"
+        assert parsed_material.lightmap_texture == "test_body_mask"
+        assert parsed_material.parallax_scale == 1.5
+        parsed_volume = read_volume(vol)
+        assert parsed_volume.file_name == "body.vol"
+        assert len(parsed_volume.vertices) == 8
+        assert len(parsed_volume.triangles) == 12
 
         parsed = read_animation(anm)
         assert parsed.mesh_frames[0]["body"].vertex_count == 4
