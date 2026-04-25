@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.pytest_cache/
+.mypy_cache/
+
+runtime_test_output/
+dist/
+release/
+*.zip
+
+Thumbs.db
+Desktop.ini

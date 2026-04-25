@@ -1,8 +1,12 @@
 # Blender GOH GEM Exporter
 
+[English](README.md) | [中文说明](README.zh-CN.md)
+
 `Blender GOH GEM Exporter` is a Blender addon for `Call to Arms - Gates of Hell` and the GEM resource pipeline.
 
 It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds Max GOH workflows while keeping the authoring experience Blender-native.
+
+Current stable release: `1.0.0`.
 
 ## Highlights
 
@@ -13,6 +17,10 @@ It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds 
 - Write inline primitive collision for `Box`, `Sphere`, and `Cylinder`
 - Support `Basis` metadata, legacy Max text properties, and structured `goh_*` properties
 - Provide Blender-side GOH panels for presets, basis metadata, transform blocks, and helper tools
+- Validate scenes before export and generate `GOH_Validation_Report.txt`
+- Auto-fill GOH material texture fields from Blender image texture names
+- Generate LOD file lists, bounds-based volume helpers, baked recoil actions, and directional fire clips
+- Bake linked recoil, impact shake, and armor ripple mesh-animation effects
 
 ## Repository Layout
 
@@ -21,7 +29,7 @@ It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds 
 - `tests/`
   Smoke and Blender runtime regression tests
 - `docs/`
-  Installation notes, quick start guidance, and prerelease notes
+  Installation notes, quick start guidance, physics-bake notes, and release notes
 
 ## Supported Workflow Areas
 
@@ -59,9 +67,96 @@ The addon installs the following GOH panels in `View3D > Sidebar > GOH`:
 - `GOH Basis`
   Blender-side replacement for MultiScript `Basis`
 - `GOH Tools`
-  Transform block tool, weapon helper shortcuts, and texture reporting
+  Transform block tool, weapon helper shortcuts, validation, material auto-fill, LOD helpers, collision helpers, physics bake presets, and texture reporting
 - `GOH Export`
-  Import and export operators
+  Import and export operators for whole `.mdl` models and `.anm` animations
+
+## GOH Validator
+
+`View3D > Sidebar > GOH > GOH Tools > Validation` creates `GOH_Validation_Report.txt` and copies the report to the clipboard.
+
+It checks common authoring mistakes:
+
+- missing Basis metadata
+- duplicate GOH export names
+- mesh objects without material slots
+- unapplied mesh scale
+- invalid LOD file names
+- invalid `goh_volume_kind`
+- missing volume bone targets
+- materials without GOH texture fields
+- missing image texture files
+
+The validator is intentionally conservative.
+It reports warnings for issues that may still export but should be inspected before opening the asset in SOEdit or the game.
+
+## Authoring Helpers
+
+`GOH Tools` now includes several production helpers:
+
+- `Auto-Fill GOH Materials`
+  infers `goh_diffuse`, `goh_bump`, `goh_specular`, `goh_lightmap`, `goh_mask`, and related texture fields from image texture node names
+- `Assign LOD Files`
+  writes `goh_lod_files` and optional `goh_lod_off` for selected visual meshes
+- `Volume From Bounds`
+  creates GOH volume helper objects from selected mesh bounding boxes
+- `Create Recoil Action`
+  generates a baked local-axis recoil action and optional `goh_sequence_*` metadata
+- `Assign Physics Link`
+  stores a source-to-driven-part relationship for linked physics baking
+- `Bake Linked Recoil`
+  bakes a recoil source plus role-specific hull pendulum spring, antenna whip, accessory jitter, follower, suspension bounce, or track rumble response into regular object keyframes
+- `Bake Directional Set`
+  creates NLA clips such as `fire_front`, `fire_back`, `fire_left`, and `fire_right`
+- `Bake Impact Response`
+  creates a damped hit/shake action for selected parts
+- `Create Armor Ripple`
+  creates per-frame shape keys for mesh-animation armor ripple effects around the 3D Cursor
+- `Physics Power`
+  scales linked recoil, impact shake, and armor ripple intensity without changing the underlying curve shape
+- `Duration Scale`
+  stretches or compresses role-specific linked physics tails without changing their relative preset behavior
+- `Clear Physics Links`
+  removes stored physics links and can detach generated GOH physics actions/NLA strips
+
+## Physics Bake Workflow
+
+The physics bake tools create normal Blender keyframes.
+They are designed for pre-baked GOH animation and mesh-animation clips, not live runtime physics simulation.
+
+Common use:
+
+1. Select the recoil source, such as `Gun`, and the driven part, such as `Body`.
+2. Make the source object active.
+3. Pick a `Link Role`, such as `Body Spring`.
+4. Run `Assign Physics Link`.
+5. Repeat for other driven parts, such as `Antenna Whip`.
+6. Activate the source object and run `Bake Linked Recoil`.
+
+If the recoil source or its current Action has `goh_sequence_name = fire` and `goh_sequence_file = fire`, linked physics bakes inherit that sequence and export as `fire.anm` instead of the default `recoil.anm`.
+
+Use `Physics Power` around `1.4-2.2` when you need heavier cannon recoil or more visible movement.
+Use `Duration Scale` below `1.0` for snappy small-caliber motion, or above `1.0` for heavy hull recovery and antenna follow-through.
+`Body Spring` is tuned for Sherman-style cannon recoil: a hard initial shove followed by smaller damped pitch and side reversals.
+For impact effects, use `Bake Impact Response`.
+For visible surface deformation, put the 3D Cursor on the hit area and run `Create Armor Ripple` on the mesh.
+
+See [Physics Bake Workflow](docs/PHYSICS_BAKE.md).
+
+## MDL Model Viewer / Import
+
+Use `File > Import > GOH Model (.mdl)` or the sidebar `GOH Export > Import GOH Model` button to load a complete GOH model for inspection.
+
+The importer reads:
+
+- `.mdl` skeleton hierarchy, transforms, `VolumeView`, and `LODView` references
+- `.ply` visual meshes with UVs, material slots, and optional skin vertex groups
+- `.mtl` material metadata and local diffuse texture files when Blender can load them
+- `.vol` polyhedron collision helpers plus inline `Box`, `Sphere`, and `Cylinder` volume blocks
+
+Recommended import settings for SOEdit-style round trips are `Axis Conversion = None / GOH Native`, `Scale Factor = 20`, and `Flip V = On`.
+Use `LOD0 Only` for quick model viewing, or disable it when you want to inspect all referenced LOD meshes.
+When importing `.anm` clips after a whole `.mdl`, leave animation `Axis Conversion` on `Auto / Match Imported Model` so transforms use the same coordinate space as the model.
 
 ## Legacy Max Compatibility
 
@@ -102,6 +197,7 @@ Compatibility rules:
 3. Select the zip file.
 4. Enable `GOH GEM Exporter`
 
+The official release asset is `blender_goh_gem_exporter-1.0.0.zip`.
 For a cleaner release-ready package, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Recommended Round-Trip Export Settings
@@ -134,8 +230,10 @@ python -X utf8 tests\smoke_test.py
 ## Documentation
 
 - [Installation Guide](docs/INSTALL.md)
+- [中文说明](README.zh-CN.md)
 - [Quick Start](docs/QUICK_START.md)
-- [Prerelease Notes](docs/RELEASE_NOTES_v0.8.0-pre1.md)
+- [Physics Bake Workflow](docs/PHYSICS_BAKE.md)
+- [v1.0.0 Release Notes](docs/RELEASE_NOTES_v1.0.0.md)
 
 ## License
 
