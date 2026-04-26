@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
+import json
 import math
 import re
 import struct
@@ -46,6 +48,7 @@ from .goh_core import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
+GOH_ADDON_VERSION = "1.0.1"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),
@@ -76,6 +79,8 @@ GOH_PHYSICS_PROP_KEYS = (
     "goh_physics_damping",
     "goh_physics_jitter",
     "goh_physics_rotation",
+    "goh_antenna_root_anchor",
+    "goh_antenna_segments",
 )
 GOH_PHYSICS_ACTION_PREFIXES = (
     "goh_recoil_",
@@ -83,8 +88,12 @@ GOH_PHYSICS_ACTION_PREFIXES = (
     "goh_linked_recoil_",
     "goh_directional_recoil_",
     "goh_impact_",
+    "goh_antenna_whip_",
 )
 GOH_PHYSICS_NLA_PREFIX = "GOH Physics"
+GOH_PHYSICS_SEGMENTS_PROP = "goh_physics_segments"
+GOH_SEQUENCE_RANGES_PROP = "goh_sequence_ranges"
+GOH_ANTENNA_SHAPE_KEY_PREFIX = "GOH_AntennaWhip_"
 
 
 @dataclass
@@ -509,10 +518,19 @@ GOH_LEGACY_INT_FALLBACKS: dict[str, tuple[str, ...]] = {
 GOH_LEGACY_BOOL_FLAGS: dict[str, tuple[str, ...]] = {
     "goh_force_mesh_animation": ("commonmesh",),
     "goh_is_volume": ("volume",),
-    "goh_lod_off": ("off",),
+    "goh_lod_off": ("off", "lodlastoff"),
+    "goh_no_cast_shadows": ("nocastshadows",),
+    "goh_decal_target": ("decaltarget",),
+    "goh_no_group_mesh": ("nogroupmesh",),
+    "goh_no_get_shadows": ("nogetshadows",),
+    "goh_ground": ("ground",),
     "goh_rotate_2d": ("rotate",),
     "goh_speed2": ("speed2",),
     "goh_terminator": ("terminator",),
+}
+
+GOH_CUSTOM_BOOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "goh_force_mesh_animation": ("goh_force_commonmesh",),
 }
 
 
@@ -922,8 +940,8 @@ class GOHToolSettings(PropertyGroup):
         soft_max=3.0,
     )
     physics_create_nla_clips: BoolProperty(
-        name="Create NLA Clips",
-        description="Push generated multi-clip physics actions into NLA strips with GOH sequence metadata",
+        name="Record Clip Ranges",
+        description="Record generated frame ranges for multi-segment ANM export on the same active Action",
         default=True,
     )
     physics_link_role: EnumProperty(
@@ -980,6 +998,22 @@ class GOHToolSettings(PropertyGroup):
         default=0.0,
         min=0.0,
         soft_max=45.0,
+    )
+    physics_antenna_root_anchor: FloatProperty(
+        name="Antenna Root Anchor",
+        description="Fraction of the antenna height kept rigid from the bottom during Antenna Whip mesh bakes; negative values move the virtual bend root below the mesh",
+        default=0.06,
+        min=-0.35,
+        max=0.95,
+        soft_min=-0.12,
+        soft_max=0.30,
+    )
+    physics_antenna_segments: IntProperty(
+        name="Antenna Bend Segments",
+        description="Minimum lengthwise segments added before Antenna Whip shape-key baking; set to 0 to keep the mesh topology unchanged",
+        default=12,
+        min=0,
+        max=64,
     )
     physics_include_scene_links: BoolProperty(
         name="Use Stored Links",
@@ -1198,7 +1232,7 @@ def _physics_role_defaults(role: str) -> tuple[float, float, float, float]:
     if role == "BODY_SPRING":
         return (1.75, 1.85, 0.16, 8.0)
     if role == "ANTENNA_WHIP":
-        return (0.75, 4.8, 0.18, 18.0)
+        return (0.75, 4.8, 0.18, 28.0)
     if role == "ACCESSORY_JITTER":
         return (0.85, 7.5, 0.24, 9.0)
     if role == "SUSPENSION_BOUNCE":
@@ -1254,18 +1288,24 @@ def _physics_role_duration_frames(settings: GOHToolSettings, role: str, base_fra
     return max(1, int(round(max(1, base_frames) * _physics_duration_scale(settings, role))))
 
 
+def _physics_link_response_frames(settings: GOHToolSettings, role: str, base_frames: int) -> int:
+    if role == "ANTENNA_WHIP":
+        return max(1, int(base_frames))
+    return _physics_role_duration_frames(settings, role, base_frames)
+
+
 def _physics_object_clip_frames(obj: bpy.types.Object, settings: GOHToolSettings, base_frames: int) -> int:
     role = _physics_role_from_object(obj, settings)
     if role == "SOURCE":
         return max(1, base_frames)
     _weight, default_delay, _frequency, _damping, _jitter, _rotation = _physics_effective_link_values(settings, role)
     delay = max(0, int(obj.get("goh_physics_delay", default_delay)))
-    return delay + _physics_role_duration_frames(settings, role, base_frames)
+    return delay + _physics_link_response_frames(settings, role, base_frames)
 
 
 def _physics_max_duration_frames(settings: GOHToolSettings, objects: Iterable[bpy.types.Object], base_frames: int) -> int:
     frames = [
-        _physics_role_duration_frames(settings, _physics_role_from_object(obj, settings), base_frames)
+        _physics_link_response_frames(settings, _physics_role_from_object(obj, settings), base_frames)
         for obj in objects
         if _physics_role_from_object(obj, settings) != "SOURCE"
     ]
@@ -1313,6 +1353,13 @@ def _smoothstep5(t: float) -> float:
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 
 
+def _physics_soft_limit(value: float, limit: float) -> float:
+    limit = abs(limit)
+    if limit <= EPSILON:
+        return 0.0
+    return limit * math.tanh(value / limit)
+
+
 def _underdamped_impulse(t: float, frequency: float, damping_ratio: float, phase: float = 0.0) -> float:
     t = max(0.0, min(1.0, t))
     omega = 2.0 * math.pi * max(0.05, frequency)
@@ -1332,6 +1379,20 @@ def _modal_response(t: float, modes: Iterable[tuple[float, float, float, float]]
         amplitude * _underdamped_impulse(t, frequency, damping, phase)
         for amplitude, frequency, damping, phase in modes
     )
+
+
+def _physics_antenna_modal_response(normalized_time: float, frequency: float, damping: float) -> float:
+    t = max(0.0, min(1.0, normalized_time))
+    if t <= 0.0:
+        return 0.0
+    modal_frequency = max(1.35, min(2.15, 1.48 + max(0.0, frequency) * 0.095))
+    damping_ratio = max(0.11, min(0.38, damping * 0.72 + 0.045))
+    spring = _underdamped_impulse(t, modal_frequency, damping_ratio, 0.0)
+    after_sway = _underdamped_impulse(t, modal_frequency * 0.58, damping_ratio + 0.10, 0.0)
+    muzzle_kick = _critically_damped_kick(t, 9.2)
+    settle_fade = 1.0 - _smoothstep5((t - 0.92) / 0.08)
+    attack = 1.0 - math.exp(-8.0 * t)
+    return (spring * 1.18 + after_sway * 0.12 + muzzle_kick * 0.18) * settle_fade * attack
 
 
 def _pendulum_swing(t: float, frequency: float, damping_ratio: float, phase: float = 0.0, attack: float = 6.0) -> float:
@@ -1378,13 +1439,12 @@ def _physics_role_motion(role: str, normalized_time: float, frequency: float, da
         rotation = 0.35 * kick + 1.18 * pitch_swing + 0.42 * counter_swing
         return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.30), fade_start=0.94)
     if role == "ANTENNA_WHIP":
-        lag = _smoothstep5(min(1.0, t * 1.35))
-        whip = lag * _modal_response(t, ((1.42, freq, damping_ratio, 0.72), (0.46, freq * 1.85, damping_ratio + 0.05, 0.0)))
-        longitudinal = whip * 0.18
-        side = lag * _modal_response(t, ((0.22, freq * 0.75, damping_ratio + 0.08, 1.2),))
-        vertical = lag * _modal_response(t, ((0.14, freq * 0.55, damping_ratio + 0.10, 0.0),))
-        rotation = whip * 1.48
-        return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.18))
+        whip = _physics_antenna_modal_response(t, freq, damping_ratio)
+        longitudinal = whip * 0.16
+        side = _underdamped_impulse(t, max(0.70, freq * 0.18), damping_ratio + 0.12, 0.0) * 0.035
+        vertical = _underdamped_impulse(t, max(0.55, freq * 0.14), damping_ratio + 0.16, 0.0) * 0.025
+        rotation = whip * 1.62
+        return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.08), fade_start=0.90)
     if role == "ACCESSORY_JITTER":
         rattle = _underdamped_impulse(t, freq, damping_ratio, 0.0)
         buzz = _underdamped_impulse(t, freq * 2.37, damping_ratio + 0.10, 0.6)
@@ -1437,6 +1497,44 @@ def _physics_axis_world(obj: bpy.types.Object, axis_key: str) -> Vector:
     return axis
 
 
+def _physics_mesh_principal_axis_world(obj: bpy.types.Object) -> Vector | None:
+    if obj.type != "MESH" or obj.data is None or not obj.data.vertices:
+        return None
+    coords = [vertex.co.copy() for vertex in obj.data.vertices]
+    axis = _physics_principal_mesh_axis(coords)
+    if axis is None or axis.length <= EPSILON:
+        return None
+    projections = [float(point.dot(axis)) for point in coords]
+    axial_extent = max(projections) - min(projections)
+    centroid = _physics_average_vector(coords)
+    radial_extent = 0.0
+    for point in coords:
+        offset = point - centroid
+        radial_extent = max(radial_extent, (offset - axis * offset.dot(axis)).length)
+    if axial_extent <= max(radial_extent * 1.35, EPSILON):
+        return None
+    world_axis = obj.matrix_world.to_3x3() @ axis
+    if world_axis.length <= EPSILON:
+        return None
+    world_axis.normalize()
+    return world_axis
+
+
+def _physics_antenna_drive_axis_world(source_obj: bpy.types.Object | None, fallback_axis: Vector) -> Vector:
+    axis = _physics_mesh_principal_axis_world(source_obj) if source_obj is not None else None
+    if axis is None:
+        axis = fallback_axis.copy()
+    if axis.length <= EPSILON:
+        axis = Vector((1.0, 0.0, 0.0))
+    axis.normalize()
+    fallback = fallback_axis.copy()
+    if fallback.length > EPSILON:
+        fallback.normalize()
+        if abs(axis.dot(fallback)) > 0.20 and axis.dot(fallback) < 0.0:
+            axis.negate()
+    return axis
+
+
 def _physics_side_axis(obj: bpy.types.Object, source_axis: Vector) -> Vector:
     local_axis = obj.matrix_world.to_3x3().inverted_safe() @ source_axis
     if local_axis.length <= EPSILON:
@@ -1447,6 +1545,401 @@ def _physics_side_axis(obj: bpy.types.Object, source_axis: Vector) -> Vector:
         side_axis = Vector((1.0, 0.0, 0.0))
     side_axis.normalize()
     return side_axis
+
+
+def _physics_perpendicular_axis(vector: Vector, anchor_axis: Vector, fallback: Vector) -> Vector:
+    axis = vector - anchor_axis * vector.dot(anchor_axis)
+    if axis.length <= EPSILON:
+        axis = fallback - anchor_axis * fallback.dot(anchor_axis)
+    if axis.length <= EPSILON:
+        axis = anchor_axis.cross(Vector((1.0, 0.0, 0.0)))
+    if axis.length <= EPSILON:
+        axis = anchor_axis.cross(Vector((0.0, 1.0, 0.0)))
+    axis.normalize()
+    return axis
+
+
+def _physics_cantilever_shape(u: float) -> float:
+    u = max(0.0, min(1.0, u))
+    return u * u * (3.0 - 2.0 * u)
+
+
+def _physics_cantilever_mode_shape(u: float, beta: float) -> float:
+    u = max(0.0, min(1.0, u))
+    beta = max(0.1, beta)
+    denominator = math.sinh(beta) + math.sin(beta)
+    sigma = 1.0 if abs(denominator) <= EPSILON else (math.cosh(beta) + math.cos(beta)) / denominator
+
+    def raw(value: float) -> float:
+        x = beta * value
+        return math.cosh(x) - math.cos(x) - sigma * (math.sinh(x) - math.sin(x))
+
+    tip = raw(1.0)
+    if abs(tip) <= EPSILON:
+        return _physics_cantilever_shape(u)
+    return raw(u) / tip
+
+
+def _physics_elastic_rod_shape(u: float) -> float:
+    u = max(0.0, min(1.0, u))
+    arc_shape = 1.0 - math.cos(0.5 * math.pi * u)
+    first_mode = _physics_cantilever_mode_shape(u, 1.875104068711961)
+    smooth_shape = u * u * u * (u * (u * 6.0 - 15.0) + 10.0)
+    cubic_shape = _physics_cantilever_shape(u)
+    return max(0.0, min(1.25, 0.62 * arc_shape + 0.18 * first_mode + 0.12 * smooth_shape + 0.08 * cubic_shape))
+
+
+def _physics_antenna_wave_shape(u: float) -> float:
+    u = max(0.0, min(1.0, u))
+    return math.sin(math.pi * u) * max(0.0, 0.75 - 0.35 * u)
+
+
+def _physics_principal_mesh_axis(coords: list[Vector]) -> Vector | None:
+    if not coords:
+        return None
+    min_values = (
+        min(point.x for point in coords),
+        min(point.y for point in coords),
+        min(point.z for point in coords),
+    )
+    max_values = (
+        max(point.x for point in coords),
+        max(point.y for point in coords),
+        max(point.z for point in coords),
+    )
+    extents = tuple(max_values[index] - min_values[index] for index in range(3))
+    if max(extents) <= EPSILON:
+        return None
+    axis = Vector((0.0, 0.0, 0.0))
+    axis[extents.index(max(extents))] = 1.0
+    centroid = Vector((0.0, 0.0, 0.0))
+    for point in coords:
+        centroid += point
+    centroid /= float(len(coords))
+    covariance = [[0.0, 0.0, 0.0] for _ in range(3)]
+    for point in coords:
+        delta = point - centroid
+        for row in range(3):
+            for column in range(3):
+                covariance[row][column] += float(delta[row] * delta[column])
+    for _ in range(16):
+        next_axis = Vector((
+            covariance[0][0] * axis.x + covariance[0][1] * axis.y + covariance[0][2] * axis.z,
+            covariance[1][0] * axis.x + covariance[1][1] * axis.y + covariance[1][2] * axis.z,
+            covariance[2][0] * axis.x + covariance[2][1] * axis.y + covariance[2][2] * axis.z,
+        ))
+        if next_axis.length <= EPSILON:
+            break
+        axis = next_axis.normalized()
+    if axis.length <= EPSILON:
+        return None
+    if abs(axis.z) > 0.10:
+        if axis.z < 0.0:
+            axis.negate()
+    else:
+        dominant_index = max(range(3), key=lambda index: abs(axis[index]))
+        if axis[dominant_index] < 0.0:
+            axis.negate()
+    return axis.normalized()
+
+
+def _physics_antenna_anchor_axis(mesh: bpy.types.Mesh) -> tuple[Vector, float, float] | None:
+    if not mesh.vertices:
+        return None
+    coords = [vertex.co for vertex in mesh.vertices]
+    axis = _physics_principal_mesh_axis(coords)
+    if axis is None:
+        return None
+    values = [float(point.dot(axis)) for point in coords]
+    min_anchor = min(values)
+    max_anchor = max(values)
+    if max_anchor - min_anchor <= EPSILON:
+        return None
+    return axis, min_anchor, max_anchor
+
+
+def _physics_average_vector(points: Iterable[Vector]) -> Vector:
+    total = Vector((0.0, 0.0, 0.0))
+    count = 0
+    for point in points:
+        total += point
+        count += 1
+    if count == 0:
+        return total
+    return total / float(count)
+
+
+def _physics_antenna_end_centers(
+    positions: list[Vector],
+    anchor_axis: Vector,
+    min_anchor: float,
+    max_anchor: float,
+) -> tuple[Vector, Vector]:
+    length = max_anchor - min_anchor
+    if not positions or length <= EPSILON:
+        zero = Vector((0.0, 0.0, 0.0))
+        return (zero, zero.copy())
+    tolerance = max(length * 0.04, EPSILON)
+    projections = [float(point.dot(anchor_axis)) for point in positions]
+    low_points = [point for point, projection in zip(positions, projections) if projection <= min_anchor + tolerance]
+    high_points = [point for point, projection in zip(positions, projections) if projection >= max_anchor - tolerance]
+    if not low_points:
+        low_points = [positions[projections.index(min(projections))]]
+    if not high_points:
+        high_points = [positions[projections.index(max(projections))]]
+    return (_physics_average_vector(low_points), _physics_average_vector(high_points))
+
+
+def _physics_axis_center_at_projection(
+    root_center: Vector,
+    tip_center: Vector,
+    min_anchor: float,
+    max_anchor: float,
+    projection: float,
+) -> Vector:
+    length = max(max_anchor - min_anchor, EPSILON)
+    return root_center.lerp(tip_center, (projection - min_anchor) / length)
+
+
+def _physics_apply_antenna_spine_constraints(
+    points: list[Vector],
+    rest_lengths: list[float],
+    rest_points: list[Vector],
+    pinned_count: int,
+    bend_stiffness: float,
+) -> None:
+    pinned_count = max(1, min(len(points), pinned_count))
+    for index in range(pinned_count):
+        points[index] = rest_points[index].copy()
+    for _iteration in range(7):
+        for index in range(pinned_count):
+            points[index] = rest_points[index].copy()
+        for index, rest_length in enumerate(rest_lengths):
+            left = index
+            right = index + 1
+            delta = points[right] - points[left]
+            distance = delta.length
+            if distance <= EPSILON:
+                continue
+            correction = delta * ((distance - rest_length) / distance)
+            left_pinned = left < pinned_count
+            right_pinned = right < pinned_count
+            if left_pinned and right_pinned:
+                continue
+            if left_pinned:
+                points[right] -= correction
+            elif right_pinned:
+                points[left] += correction
+            else:
+                points[left] += correction * 0.5
+                points[right] -= correction * 0.5
+        if bend_stiffness > 0.0 and len(points) > pinned_count + 2:
+            for index in range(max(1, pinned_count), len(points) - 1):
+                target = (points[index - 1] + points[index + 1]) * 0.5
+                points[index] = points[index].lerp(target, bend_stiffness)
+    for index in range(pinned_count):
+        points[index] = rest_points[index].copy()
+
+
+def _physics_antenna_spine_sample(
+    points: list[Vector],
+    projection: float,
+    min_anchor: float,
+    max_anchor: float,
+) -> tuple[Vector, Vector]:
+    if not points:
+        zero = Vector((0.0, 0.0, 0.0))
+        return zero, Vector((0.0, 0.0, 1.0))
+    if len(points) == 1:
+        return points[0].copy(), Vector((0.0, 0.0, 1.0))
+    length = max(max_anchor - min_anchor, EPSILON)
+    scaled = max(0.0, min(1.0, (projection - min_anchor) / length)) * float(len(points) - 1)
+    index = min(len(points) - 2, max(0, int(math.floor(scaled))))
+    factor = scaled - float(index)
+    center = points[index].lerp(points[index + 1], factor)
+    tangent_left = max(0, index - 1)
+    tangent_right = min(len(points) - 1, index + 2)
+    tangent = points[tangent_right] - points[tangent_left]
+    if tangent.length <= EPSILON:
+        tangent = points[index + 1] - points[index]
+    if tangent.length <= EPSILON:
+        tangent = Vector((0.0, 0.0, 1.0))
+    else:
+        tangent.normalize()
+    return center, tangent
+
+
+def _physics_simulate_antenna_spine(
+    rest_points: list[Vector],
+    anchor_axis: Vector,
+    bend_axis: Vector,
+    secondary_axis: Vector,
+    distance: float,
+    start: int,
+    end: int,
+    duration: int,
+    delay: int,
+    frequency: float,
+    damping: float,
+    jitter: float,
+    weight: float,
+    rotation_degrees: float,
+    role: str,
+    obj: bpy.types.Object,
+    pinned_count: int,
+) -> dict[int, list[Vector]]:
+    if len(rest_points) < 2:
+        return {frame: [point.copy() for point in rest_points] for frame in range(start, end + 1)}
+    rest_lengths = [(rest_points[index + 1] - rest_points[index]).length for index in range(len(rest_points) - 1)]
+    points = [point.copy() for point in rest_points]
+    frames: dict[int, list[Vector]] = {}
+    drive_weight = 0.92 + math.log1p(max(0.0, weight)) * 0.48
+    free_length = sum(rest_lengths[max(0, pinned_count - 1):]) or sum(rest_lengths) or 1.0
+    bend_stiffness = max(0.12, min(0.34, 0.20 + damping * 0.12))
+    tip_limit = free_length * 0.62
+    frame_duration = float(max(1, duration))
+
+    for frame in range(start, end + 1):
+        local_frame = frame - start - delay
+        normalized = 0.0 if local_frame <= 0 else max(0.0, min(1.0, local_frame / frame_duration))
+        recoil_modal = _physics_antenna_modal_response(normalized, frequency, damping)
+        recoil_kick = _critically_damped_kick(normalized, 7.2) if local_frame > 0 else 0.0
+        jitter_value = 0.0 if local_frame <= 0 else _deterministic_jitter(obj, frame) * jitter * max(0.0, 1.0 - normalized)
+        angle = math.radians(rotation_degrees) * drive_weight * recoil_modal
+        primary_tip = math.sin(angle) * free_length * 0.46
+        primary_tip += distance * drive_weight * (recoil_modal * 0.72 + recoil_kick * 0.12)
+        primary_tip = _physics_soft_limit(primary_tip, tip_limit)
+        secondary_tip = distance * jitter_value * 0.045
+        axial_tip = distance * recoil_modal * 0.018
+        next_points = [point.copy() for point in rest_points]
+        for index in range(len(points)):
+            if index < pinned_count:
+                next_points[index] = rest_points[index].copy()
+                continue
+            free_u = (index - (pinned_count - 1)) / float(max(1, len(points) - pinned_count))
+            profile = _physics_elastic_rod_shape(free_u)
+            tip_profile = free_u * free_u * free_u
+            next_points[index] = (
+                rest_points[index]
+                + bend_axis * (primary_tip * profile)
+                + secondary_axis * (secondary_tip * tip_profile)
+                + anchor_axis * (axial_tip * profile)
+            )
+        points = next_points
+        _physics_apply_antenna_spine_constraints(points, rest_lengths, rest_points, pinned_count, bend_stiffness)
+        end_blend = _smoothstep5((normalized - 0.90) / 0.10)
+        if frame >= end:
+            end_blend = 1.0
+        if end_blend > 0.0:
+            for index in range(len(points)):
+                points[index] = points[index].lerp(rest_points[index], end_blend)
+            _physics_apply_antenna_spine_constraints(points, rest_lengths, rest_points, pinned_count, bend_stiffness)
+        frames[frame] = [point.copy() for point in points]
+    return frames
+
+
+def _physics_axis_level_count(mesh: bpy.types.Mesh, anchor_axis: Vector) -> int:
+    if not mesh.vertices:
+        return 0
+    values = sorted(float(vertex.co.dot(anchor_axis)) for vertex in mesh.vertices)
+    if not values:
+        return 0
+    tolerance = max(EPSILON, (values[-1] - values[0]) * 1e-5)
+    count = 1
+    last = values[0]
+    for value in values[1:]:
+        if abs(value - last) > tolerance:
+            count += 1
+            last = value
+    return count
+
+
+def _physics_remove_antenna_shape_keys(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH" or obj.data is None:
+        return False
+    shape_keys = getattr(obj.data, "shape_keys", None)
+    if shape_keys is None:
+        return False
+    changed = False
+    for key_block in list(shape_keys.key_blocks):
+        if key_block.name.startswith(GOH_ANTENNA_SHAPE_KEY_PREFIX):
+            obj.shape_key_remove(key_block)
+            changed = True
+    return changed
+
+
+def _physics_clear_shape_keys(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH" or obj.data is None:
+        return False
+    shape_keys = getattr(obj.data, "shape_keys", None)
+    if shape_keys is None:
+        return False
+    try:
+        obj.shape_key_clear()
+        return True
+    except AttributeError:
+        pass
+    for key_block in reversed(list(shape_keys.key_blocks)):
+        obj.shape_key_remove(key_block)
+    return True
+
+
+def _physics_has_user_shape_keys(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH" or obj.data is None:
+        return False
+    shape_keys = getattr(obj.data, "shape_keys", None)
+    if shape_keys is None:
+        return False
+    return any(
+        key_block.name != "Basis" and not key_block.name.startswith(GOH_ANTENNA_SHAPE_KEY_PREFIX)
+        for key_block in shape_keys.key_blocks
+    )
+
+
+def _physics_subdivide_antenna_mesh_for_bend(
+    obj: bpy.types.Object,
+    anchor_axis: Vector,
+    min_anchor: float,
+    max_anchor: float,
+    target_segments: int,
+) -> bool:
+    if obj.type != "MESH" or obj.data is None or target_segments < 2:
+        return False
+    if _physics_has_user_shape_keys(obj):
+        return False
+    mesh = obj.data
+    length = max_anchor - min_anchor
+    if length <= EPSILON or _physics_axis_level_count(mesh, anchor_axis) >= target_segments + 1:
+        return False
+    if getattr(mesh, "shape_keys", None) is not None:
+        _physics_clear_shape_keys(obj)
+        mesh = obj.data
+
+    target_interval = length / float(max(1, target_segments))
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh)
+        bm.edges.ensure_lookup_table()
+        edge_groups: dict[int, list[bmesh.types.BMEdge]] = {}
+        for edge in bm.edges:
+            delta = edge.verts[1].co - edge.verts[0].co
+            axial_delta = abs(float(delta.dot(anchor_axis)))
+            if axial_delta <= target_interval * 1.05:
+                continue
+            radial_delta = (delta - anchor_axis * delta.dot(anchor_axis)).length
+            if radial_delta > EPSILON and axial_delta <= radial_delta * 1.25:
+                continue
+            cuts = max(1, min(16, int(math.ceil(axial_delta / target_interval)) - 1))
+            edge_groups.setdefault(cuts, []).append(edge)
+        if not edge_groups:
+            return False
+        for cuts, edges in sorted(edge_groups.items(), reverse=True):
+            bmesh.ops.subdivide_edges(bm, edges=edges, cuts=cuts, use_grid_fill=True, smooth=0.0)
+        bm.to_mesh(mesh)
+    finally:
+        bm.free()
+    mesh.update()
+    return True
 
 
 def _physics_direction_specs(direction_set: str, prefix: str) -> tuple[tuple[str, str], ...]:
@@ -1486,7 +1979,7 @@ def _physics_linked_objects(
 def _is_goh_physics_action(action: bpy.types.Action | None) -> bool:
     if action is None:
         return False
-    return any(action.name.startswith(prefix) for prefix in GOH_PHYSICS_ACTION_PREFIXES)
+    return any(action.name.startswith(prefix) for prefix in GOH_PHYSICS_ACTION_PREFIXES) or GOH_PHYSICS_SEGMENTS_PROP in action
 
 
 def _physics_mark_sequence(owner, sequence_name: str | None, file_stem: str | None = None) -> None:
@@ -1527,6 +2020,213 @@ def _physics_sequence_names(default_name: str, *sources) -> tuple[str, str]:
     return sequence_name, file_stem
 
 
+def _physics_load_action_segments(action: bpy.types.Action | None) -> list[dict[str, object]]:
+    if action is None:
+        return []
+    raw = action.get(GOH_PHYSICS_SEGMENTS_PROP)
+    if raw is None:
+        return []
+    try:
+        data = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    segments: list[dict[str, object]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = int(item.get("frame_start", 0))
+            end = int(item.get("frame_end", start))
+        except (TypeError, ValueError):
+            continue
+        name = sanitized_file_stem(str(item.get("name") or "").strip())
+        file_stem = sanitized_file_stem(str(item.get("file_stem") or name).strip())
+        if not name:
+            continue
+        segments.append(
+            {
+                "name": name,
+                "file_stem": file_stem or name,
+                "frame_start": min(start, end),
+                "frame_end": max(start, end),
+            }
+        )
+    return segments
+
+
+def _physics_store_action_segments(action: bpy.types.Action, segments: list[dict[str, object]]) -> None:
+    normalized = sorted(
+        _physics_load_action_segments_from_iterable(segments),
+        key=lambda item: (int(item["frame_start"]), int(item["frame_end"]), str(item["name"]).lower()),
+    )
+    action[GOH_PHYSICS_SEGMENTS_PROP] = json.dumps(normalized, separators=(",", ":"))
+
+
+def _physics_segments_display_text(segments: Iterable[dict[str, object]]) -> str:
+    parts: list[str] = []
+    for segment in _physics_load_action_segments_from_iterable(segments):
+        name = str(segment["name"])
+        file_stem = str(segment.get("file_stem") or name)
+        frame_start = int(segment["frame_start"])
+        frame_end = int(segment["frame_end"])
+        label = name if file_stem == name else f"{name}->{file_stem}"
+        parts.append(f"{label}:{frame_start}-{frame_end}")
+    return "; ".join(parts)
+
+
+def _physics_sync_object_sequence_ranges(obj: bpy.types.Object, action: bpy.types.Action | None = None) -> None:
+    if obj is None:
+        return
+    if action is None:
+        animation_data = getattr(obj, "animation_data", None)
+        action = getattr(animation_data, "action", None) if animation_data else None
+    text = _physics_segments_display_text(_physics_load_action_segments(action))
+    if text:
+        obj[GOH_SEQUENCE_RANGES_PROP] = text
+    elif GOH_SEQUENCE_RANGES_PROP in obj:
+        del obj[GOH_SEQUENCE_RANGES_PROP]
+
+
+def _physics_load_action_segments_from_iterable(segments: Iterable[dict[str, object]]) -> list[dict[str, object]]:
+    actionless: list[dict[str, object]] = []
+    for item in segments:
+        try:
+            start = int(item.get("frame_start", 0))
+            end = int(item.get("frame_end", start))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        name = sanitized_file_stem(str(item.get("name") or "").strip())
+        file_stem = sanitized_file_stem(str(item.get("file_stem") or name).strip())
+        if not name:
+            continue
+        actionless.append(
+            {
+                "name": name,
+                "file_stem": file_stem or name,
+                "frame_start": min(start, end),
+                "frame_end": max(start, end),
+            }
+        )
+    return actionless
+
+
+def _physics_parse_sequence_ranges_text(text: str | None) -> list[dict[str, object]]:
+    if not text:
+        return []
+    segments: list[dict[str, object]] = []
+    for raw_entry in re.split(r"[;\n]+", str(text)):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        match = re.match(
+            r"^\s*(?P<label>[^:]+?)\s*:\s*(?P<start>-?\d+)\s*[-,]\s*(?P<end>-?\d+)\s*$",
+            entry,
+        )
+        if not match:
+            continue
+        label = match.group("label").strip()
+        if "->" in label:
+            name_text, file_text = [part.strip() for part in label.split("->", 1)]
+        else:
+            name_text, file_text = label, label
+        name = sanitized_file_stem(name_text)
+        file_stem = sanitized_file_stem(file_text) or name
+        if not name:
+            continue
+        segments.append(
+            {
+                "name": name,
+                "file_stem": file_stem,
+                "frame_start": int(match.group("start")),
+                "frame_end": int(match.group("end")),
+            }
+        )
+    return _physics_load_action_segments_from_iterable(segments)
+
+
+def _physics_object_sequence_ranges(obj: bpy.types.Object, action: bpy.types.Action | None = None) -> list[dict[str, object]]:
+    manual = _physics_parse_sequence_ranges_text(_physics_custom_text(obj, GOH_SEQUENCE_RANGES_PROP))
+    if manual:
+        return manual
+    return _physics_load_action_segments(action)
+
+
+def _physics_ranges_overlap(left_start: int, left_end: int, right_start: int, right_end: int) -> bool:
+    return left_start <= right_end and right_start <= left_end
+
+
+def _physics_remember_action_segment(
+    action: bpy.types.Action,
+    sequence_name: str | None,
+    file_stem: str | None,
+    start: int,
+    end: int,
+) -> None:
+    if not sequence_name:
+        return
+    name = sanitized_file_stem(sequence_name)
+    file_name = sanitized_file_stem(file_stem or name)
+    if not name:
+        return
+    frame_start = min(int(start), int(end))
+    frame_end = max(int(start), int(end))
+    segments = [
+        segment
+        for segment in _physics_load_action_segments(action)
+        if not _physics_ranges_overlap(
+            int(segment["frame_start"]),
+            int(segment["frame_end"]),
+            frame_start,
+            frame_end,
+        )
+    ]
+    segments.append(
+        {
+            "name": name,
+            "file_stem": file_name or name,
+            "frame_start": frame_start,
+            "frame_end": frame_end,
+        }
+    )
+    _physics_store_action_segments(action, segments)
+
+
+def _physics_remove_action_keys(
+    action: bpy.types.Action | None,
+    data_paths: set[str],
+    start: int,
+    end: int,
+) -> None:
+    if action is None or not data_paths:
+        return
+    frame_start = min(int(start), int(end)) - EPSILON
+    frame_end = max(int(start), int(end)) + EPSILON
+    for fcurve in _action_fcurves(action):
+        if fcurve.data_path not in data_paths:
+            continue
+        for keyframe in reversed(list(fcurve.keyframe_points)):
+            frame = float(keyframe.co.x)
+            if frame_start <= frame <= frame_end:
+                fcurve.keyframe_points.remove(keyframe, fast=True)
+        try:
+            fcurve.update()
+        except RuntimeError:
+            pass
+
+
+def _physics_remove_generated_nla_tracks(owner) -> None:
+    animation_data = getattr(owner, "animation_data", None)
+    if animation_data is None:
+        return
+    for track in list(animation_data.nla_tracks):
+        if track.name.startswith(GOH_PHYSICS_NLA_PREFIX) or any(_is_goh_physics_action(strip.action) for strip in track.strips):
+            animation_data.nla_tracks.remove(track)
+    if not animation_data.nla_tracks:
+        animation_data.use_nla = False
+
+
 def _physics_push_action_to_nla(
     obj: bpy.types.Object,
     action: bpy.types.Action,
@@ -1540,7 +2240,19 @@ def _physics_push_action_to_nla(
     strip = track.strips.new(sequence_name, start, action)
     strip.name = sequence_name
     strip.frame_start = start
-    strip.frame_end = max(start + 1, end)
+    # NLA strip end is exclusive for sampling/export range purposes.
+    strip.frame_end = max(start + 1, end + 1)
+    for attr, value in (
+        ("blend_type", "REPLACE"),
+        ("extrapolation", "NOTHING"),
+        ("use_auto_blend", False),
+        ("blend_in", 0.0),
+        ("blend_out", 0.0),
+    ):
+        try:
+            setattr(strip, attr, value)
+        except (AttributeError, TypeError, ValueError):
+            pass
     try:
         _physics_mark_sequence(strip, sequence_name)
     except TypeError:
@@ -1548,17 +2260,36 @@ def _physics_push_action_to_nla(
     animation_data.use_nla = True
 
 
+def _physics_detach_active_action_after_nla(obj: bpy.types.Object, action: bpy.types.Action) -> None:
+    animation_data = getattr(obj, "animation_data", None)
+    if animation_data is not None and animation_data.action == action:
+        animation_data.action = None
+
+
 def _physics_prepare_action(
     obj: bpy.types.Object,
     action_prefix: str,
     sequence_name: str | None,
     file_stem: str | None,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+    data_paths: set[str] | None = None,
 ) -> bpy.types.Action:
-    obj.animation_data_create()
-    action = bpy.data.actions.new(_physics_action_name(action_prefix, obj))
-    if sequence_name:
+    _physics_remove_generated_nla_tracks(obj)
+    animation_data = obj.animation_data_create()
+    action = animation_data.action
+    if action is None:
+        action = bpy.data.actions.new(_physics_action_name(action_prefix, obj))
+        animation_data.action = action
+    if start is not None and end is not None:
+        if data_paths:
+            _physics_remove_action_keys(action, data_paths, start, end)
+        _physics_remember_action_segment(action, sequence_name, file_stem, start, end)
+        _physics_sync_object_sequence_ranges(obj, action)
+    elif sequence_name and not _physics_load_action_segments(action):
         _physics_mark_sequence(action, sequence_name, file_stem)
-    obj.animation_data.action = action
+    animation_data.action = action
     return action
 
 
@@ -1596,9 +2327,18 @@ def _physics_bake_source_recoil(
     create_nla: bool = False,
     clip_end: int | None = None,
 ) -> bpy.types.Action:
+    _physics_remove_generated_nla_tracks(source)
     original_location = source.location.copy()
-    action = _physics_prepare_action(source, action_prefix, sequence_name, file_stem)
     action_end = max(end, int(clip_end if clip_end is not None else end))
+    action = _physics_prepare_action(
+        source,
+        action_prefix,
+        sequence_name,
+        file_stem,
+        start=start,
+        end=action_end,
+        data_paths={"location"},
+    )
     keyframes = [
         (start, original_location),
         (peak, original_location + _object_local_offset_from_world(source, axis * distance)),
@@ -1614,8 +2354,6 @@ def _physics_bake_source_recoil(
     source.location = original_location
     if write_object_sequence:
         _physics_mark_sequence(source, sequence_name or "recoil", file_stem or sequence_name or "recoil")
-    if create_nla and sequence_name:
-        _physics_push_action_to_nla(source, action, sequence_name, start, action_end)
     return action
 
 
@@ -1632,6 +2370,7 @@ def _physics_bake_linked_response(
     file_stem: str | None = None,
     create_nla: bool = False,
     base_duration: int | None = None,
+    source_obj: bpy.types.Object | None = None,
 ) -> bpy.types.Action | None:
     role = _physics_role_from_object(obj, settings)
     if role == "SOURCE":
@@ -1644,9 +2383,11 @@ def _physics_bake_linked_response(
     damping = float(obj.get("goh_physics_damping", default_damping))
     jitter = float(obj.get("goh_physics_jitter", default_jitter)) * power
     rotation_degrees = float(obj.get("goh_physics_rotation", default_rotation)) * max(0.15, power ** 0.65)
+    _physics_remove_generated_nla_tracks(obj)
     original_location = obj.location.copy()
     original_rotation = obj.rotation_euler.copy()
-    side_axis = _physics_side_axis(obj, source_axis)
+    drive_axis = _physics_antenna_drive_axis_world(source_obj, source_axis) if role == "ANTENNA_WHIP" else source_axis
+    side_axis = _physics_side_axis(obj, drive_axis)
     world_side_axis = obj.matrix_world.to_3x3() @ side_axis
     if world_side_axis.length <= EPSILON:
         world_side_axis = side_axis.copy()
@@ -1656,15 +2397,43 @@ def _physics_bake_linked_response(
         world_up_axis = Vector((0.0, 0.0, 1.0))
     world_up_axis.normalize()
 
-    action = _physics_prepare_action(obj, action_prefix, sequence_name, file_stem)
     base_frames = max(1, int(base_duration if base_duration is not None else end - start))
-    duration = _physics_role_duration_frames(settings, role, base_frames)
+    duration = _physics_link_response_frames(settings, role, base_frames)
+    action = _physics_prepare_action(
+        obj,
+        action_prefix,
+        sequence_name,
+        file_stem,
+        start=start,
+        end=end,
+        data_paths={"location", "rotation_euler"},
+    )
+    if role == "ANTENNA_WHIP" and obj.type == "MESH":
+        mesh_action = _physics_bake_antenna_whip_mesh_response(
+            obj,
+            drive_axis,
+            side_axis,
+            distance,
+            start,
+            end,
+            settings,
+            sequence_name=sequence_name,
+            file_stem=file_stem,
+            base_duration=base_duration,
+        )
+        if mesh_action is not None:
+            _physics_key_rest_transform(obj, original_location, original_rotation, start, end)
+            _set_action_interpolation(action, "LINEAR")
+            obj.location = original_location
+            obj.rotation_euler = original_rotation
+            return action
+
     for frame in range(start, end + 1):
         local_frame = frame - start - delay
         normalized = 0.0 if local_frame <= 0 else max(0.0, min(1.0, local_frame / duration))
         longitudinal, side, vertical, rotation_response, jitter_scale = _physics_role_motion(role, normalized, frequency, damping)
         jitter_value = 0.0 if local_frame <= 0 else _deterministic_jitter(obj, frame) * jitter * max(0.0, 1.0 - normalized)
-        offset = source_axis * (distance * weight * longitudinal)
+        offset = drive_axis * (distance * weight * longitudinal)
         offset += world_side_axis * (distance * weight * side)
         offset += world_up_axis * (distance * weight * vertical)
         offset += world_side_axis * (distance * jitter_value * jitter_scale)
@@ -1680,8 +2449,165 @@ def _physics_bake_linked_response(
     _set_action_interpolation(action, "LINEAR")
     obj.location = original_location
     obj.rotation_euler = original_rotation
-    if create_nla and sequence_name:
-        _physics_push_action_to_nla(obj, action, sequence_name, start, end)
+    return action
+
+
+def _physics_key_rest_transform(
+    obj: bpy.types.Object,
+    location: Vector,
+    rotation,
+    start: int,
+    end: int,
+) -> None:
+    for frame in (start, end):
+        obj.location = location
+        obj.rotation_euler = rotation.copy()
+        obj.keyframe_insert(data_path="location", frame=frame)
+        obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+
+
+def _physics_bake_antenna_whip_mesh_response(
+    obj: bpy.types.Object,
+    source_axis: Vector,
+    side_axis: Vector,
+    distance: float,
+    start: int,
+    end: int,
+    settings: GOHToolSettings,
+    *,
+    sequence_name: str | None = None,
+    file_stem: str | None = None,
+    base_duration: int | None = None,
+) -> bpy.types.Action | None:
+    if obj.type != "MESH" or obj.data is None or not obj.data.vertices:
+        return None
+
+    mesh = obj.data
+    _physics_remove_antenna_shape_keys(obj)
+    anchor_data = _physics_antenna_anchor_axis(mesh)
+    if anchor_data is None:
+        return None
+    anchor_axis, min_anchor, max_anchor = anchor_data
+    length = max_anchor - min_anchor
+    if length <= EPSILON:
+        return None
+
+    target_segments = int(obj.get("goh_antenna_segments", getattr(settings, "physics_antenna_segments", 12)))
+    if _physics_subdivide_antenna_mesh_for_bend(obj, anchor_axis, min_anchor, max_anchor, target_segments):
+        mesh = obj.data
+        anchor_data = _physics_antenna_anchor_axis(mesh)
+        if anchor_data is None:
+            return None
+        anchor_axis, min_anchor, max_anchor = anchor_data
+        length = max_anchor - min_anchor
+        if length <= EPSILON:
+            return None
+
+    role = _physics_role_from_object(obj, settings)
+    default_weight, default_delay, default_frequency, default_damping, default_jitter, default_rotation = _physics_effective_link_values(settings, role)
+    power = max(0.0, float(getattr(settings, "physics_power", 1.0)))
+    weight = float(obj.get("goh_physics_weight", default_weight)) * power
+    delay = int(obj.get("goh_physics_delay", default_delay))
+    frequency = float(obj.get("goh_physics_frequency", default_frequency))
+    damping = float(obj.get("goh_physics_damping", default_damping))
+    jitter = float(obj.get("goh_physics_jitter", default_jitter)) * power
+    rotation_degrees = float(obj.get("goh_physics_rotation", default_rotation)) * max(0.15, power ** 0.65)
+    root_anchor = float(obj.get("goh_antenna_root_anchor", getattr(settings, "physics_antenna_root_anchor", 0.06)))
+    root_anchor = max(-0.35, min(0.95, root_anchor))
+    pin_anchor = min_anchor + length * max(0.0, root_anchor)
+    pin_anchor = min(max(pin_anchor, min_anchor), max_anchor)
+
+    source_local = obj.matrix_world.to_3x3().inverted_safe() @ source_axis
+    side_local = side_axis.copy()
+    bend_axis = _physics_perpendicular_axis(source_local, anchor_axis, Vector((1.0, 0.0, 0.0)))
+    secondary_axis = _physics_perpendicular_axis(side_local, anchor_axis, anchor_axis.cross(bend_axis))
+    base_frames = max(1, int(base_duration if base_duration is not None else end - start))
+    duration = _physics_link_response_frames(settings, role, base_frames)
+    response_end = min(end, start + max(1, delay + duration))
+
+    if mesh.shape_keys is None:
+        obj.shape_key_add(name="Basis", from_mix=False)
+    shape_keys = mesh.shape_keys
+    if shape_keys is None:
+        return None
+
+    prefix = f"{GOH_ANTENNA_SHAPE_KEY_PREFIX}{sanitized_file_stem(sequence_name or 'whip')}_"
+
+    base_positions = [vertex.co.copy() for vertex in mesh.vertices]
+    root_center, tip_center = _physics_antenna_end_centers(base_positions, anchor_axis, min_anchor, max_anchor)
+    if (tip_center - root_center).length <= EPSILON:
+        tip_center = root_center + anchor_axis * length
+    actual_levels = _physics_axis_level_count(mesh, anchor_axis)
+    spine_count = max(6, min(80, max(target_segments + 1, actual_levels)))
+    rest_spine = [
+        root_center.lerp(tip_center, index / float(max(1, spine_count - 1)))
+        for index in range(spine_count)
+    ]
+    pinned_count = max(1, min(spine_count - 1, int(math.floor(max(0.0, root_anchor) * float(spine_count - 1))) + 1))
+    spine_frames = _physics_simulate_antenna_spine(
+        rest_spine,
+        anchor_axis,
+        bend_axis,
+        secondary_axis,
+        distance,
+        start,
+        response_end,
+        duration,
+        delay,
+        frequency,
+        damping,
+        jitter,
+        weight,
+        rotation_degrees,
+        role,
+        obj,
+        pinned_count,
+    )
+    whip_keys: list[tuple[int, bpy.types.ShapeKey]] = []
+
+    for frame in range(start, response_end + 1):
+        spine = spine_frames.get(frame, rest_spine)
+        key_block = obj.shape_key_add(name=f"{prefix}{frame:04d}", from_mix=False)
+        for vertex in mesh.vertices:
+            base = base_positions[vertex.index]
+            projection = base.dot(anchor_axis)
+            if projection <= pin_anchor + EPSILON:
+                key_block.data[vertex.index].co = base
+                continue
+            rest_center, rest_tangent = _physics_antenna_spine_sample(rest_spine, projection, min_anchor, max_anchor)
+            deformed_center, tangent = _physics_antenna_spine_sample(spine, projection, min_anchor, max_anchor)
+            try:
+                section_rotation = rest_tangent.rotation_difference(tangent)
+                radial = base - rest_center
+                rotated_radial = section_rotation @ radial
+            except ValueError:
+                rotated_radial = base - rest_center
+            key_block.data[vertex.index].co = deformed_center + rotated_radial
+        whip_keys.append((frame, key_block))
+
+    shape_keys.animation_data_create()
+    _physics_remove_generated_nla_tracks(shape_keys)
+    action = bpy.data.actions.new(f"goh_antenna_whip_{sanitized_file_stem(obj.name)}")
+    _physics_mark_sequence(action, sequence_name or "whip", file_stem or sequence_name or "whip")
+    _physics_remember_action_segment(action, sequence_name or "whip", file_stem or sequence_name or "whip", start, response_end)
+    shape_keys.animation_data.action = action
+
+    for _frame, key_block in whip_keys:
+        key_block.value = 0.0
+    for current_frame, current_key in whip_keys:
+        for _frame, key_block in whip_keys:
+            key_block.value = 1.0 if key_block == current_key else 0.0
+            key_block.keyframe_insert(data_path="value", frame=current_frame)
+    for fcurve in _action_fcurves(action):
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = "LINEAR"
+    for _frame, key_block in whip_keys:
+        key_block.value = 0.0
+
+    obj["goh_force_mesh_animation"] = True
+    obj["goh_antenna_root_anchor"] = root_anchor
+    obj["goh_antenna_segments"] = max(0, target_segments)
+    obj["goh_antenna_effective_segments"] = max(0, _physics_axis_level_count(mesh, anchor_axis) - 1)
     return action
 
 
@@ -1711,6 +2637,7 @@ def _physics_bake_impact_response(
     damping = float(obj.get("goh_physics_damping", default_damping))
     jitter = float(obj.get("goh_physics_jitter", default_jitter)) * power
     rotation_degrees = float(obj.get("goh_physics_rotation", default_rotation)) * max(0.15, power ** 0.65)
+    _physics_remove_generated_nla_tracks(obj)
     original_location = obj.location.copy()
     original_rotation = obj.rotation_euler.copy()
     side_axis = _physics_side_axis(obj, axis)
@@ -1722,9 +2649,17 @@ def _physics_bake_impact_response(
     if world_up_axis.length <= EPSILON:
         world_up_axis = Vector((0.0, 0.0, 1.0))
     world_up_axis.normalize()
-    action = _physics_prepare_action(obj, "goh_impact", sequence_name, sequence_name)
     base_frames = max(1, int(base_duration if base_duration is not None else end - start - 1))
     duration = _physics_role_duration_frames(settings, role, base_frames)
+    action = _physics_prepare_action(
+        obj,
+        "goh_impact",
+        sequence_name,
+        sequence_name,
+        start=start,
+        end=end,
+        data_paths={"location", "rotation_euler"},
+    )
     for frame in range(start, end + 1):
         if frame == start:
             response = 0.0
@@ -1748,8 +2683,6 @@ def _physics_bake_impact_response(
     _set_action_interpolation(action, "LINEAR")
     obj.location = original_location
     obj.rotation_euler = original_rotation
-    if create_nla:
-        _physics_push_action_to_nla(obj, action, sequence_name, start, end)
     return action
 
 
@@ -1840,18 +2773,38 @@ def _physics_clear_object(obj: bpy.types.Object, clear_actions: bool) -> bool:
         if key in obj:
             del obj[key]
             changed = True
+    if clear_actions and GOH_SEQUENCE_RANGES_PROP in obj:
+        del obj[GOH_SEQUENCE_RANGES_PROP]
+        changed = True
     if not clear_actions:
         return changed
+
     animation_data = getattr(obj, "animation_data", None)
-    if animation_data is None:
-        return changed
-    if _is_goh_physics_action(animation_data.action):
-        animation_data.action = None
-        changed = True
-    for track in list(animation_data.nla_tracks):
-        if track.name.startswith(GOH_PHYSICS_NLA_PREFIX) or any(_is_goh_physics_action(strip.action) for strip in track.strips):
-            animation_data.nla_tracks.remove(track)
+    if animation_data is not None:
+        if _is_goh_physics_action(animation_data.action):
+            animation_data.action = None
             changed = True
+        for track in list(animation_data.nla_tracks):
+            if track.name.startswith(GOH_PHYSICS_NLA_PREFIX) or any(_is_goh_physics_action(strip.action) for strip in track.strips):
+                animation_data.nla_tracks.remove(track)
+                changed = True
+
+    if obj.type == "MESH" and obj.data is not None:
+        shape_keys = getattr(obj.data, "shape_keys", None)
+        if shape_keys is not None:
+            shape_animation = getattr(shape_keys, "animation_data", None)
+            if shape_animation is not None:
+                if _is_goh_physics_action(shape_animation.action):
+                    shape_animation.action = None
+                    changed = True
+                for track in list(shape_animation.nla_tracks):
+                    if track.name.startswith(GOH_PHYSICS_NLA_PREFIX) or any(_is_goh_physics_action(strip.action) for strip in track.strips):
+                        shape_animation.nla_tracks.remove(track)
+                        changed = True
+            for key_block in list(shape_keys.key_blocks):
+                if key_block.name.startswith(GOH_ANTENNA_SHAPE_KEY_PREFIX):
+                    obj.shape_key_remove(key_block)
+                    changed = True
     return changed
 
 
@@ -2097,8 +3050,61 @@ class GOHBlenderExporter:
             self._attach_animations(bundle, visual_objects)
 
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        write_export_bundle(self.output_path.parent, bundle)
+        written = write_export_bundle(self.output_path.parent, bundle)
+        self._write_export_manifest(bundle, written)
         return bundle, self.warnings
+
+    def _write_export_manifest(self, bundle: ExportBundle, written: dict[str, Path]) -> None:
+        output_dir = self.output_path.parent
+        files: list[dict[str, object]] = []
+        for path in sorted({Path(value) for value in written.values()}, key=lambda item: str(item).lower()):
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                relative_path = path.relative_to(output_dir)
+            except ValueError:
+                relative_path = path
+            files.append(
+                {
+                    "path": str(relative_path).replace("\\", "/"),
+                    "size": path.stat().st_size,
+                    "sha256": self._file_sha256(path),
+                }
+            )
+
+        payload = {
+            "name": "Blender GOH GEM Exporter Manifest",
+            "addon_version": GOH_ADDON_VERSION,
+            "blender_version": bpy.app.version_string,
+            "model": bundle.model.file_name,
+            "counts": {
+                "meshes": len(bundle.meshes),
+                "materials": len(bundle.materials),
+                "volumes": len(bundle.model.volumes),
+                "obstacles": len(bundle.model.obstacles),
+                "areas": len(bundle.model.areas),
+                "animations": len(bundle.animations),
+            },
+            "settings": {
+                "axis_mode": self.operator.axis_mode,
+                "scale_factor": float(self.scale_factor),
+                "flip_v": bool(self.operator.flip_v),
+                "export_animations": bool(self.operator.export_animations),
+            },
+            "warnings": list(self.warnings),
+            "files": files,
+        }
+        manifest_path = output_dir / "GOH_Export_Manifest.json"
+        temp_path = manifest_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temp_path.replace(manifest_path)
+
+    def _file_sha256(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as fp:
+            for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _collect_scope_objects(
         self,
@@ -2332,6 +3338,7 @@ class GOHBlenderExporter:
             return sorted(nla_specs.values(), key=lambda clip: (clip.frame_start, clip.frame_end, clip.name.lower()))
 
         action_sources: list[tuple[bpy.types.Object, bpy.types.Action]] = []
+        segment_specs: dict[tuple[str, int, int], AnimationClipSpec] = {}
         start_frame: int | None = None
         end_frame: int | None = None
         names: list[str] = []
@@ -2340,12 +3347,36 @@ class GOHBlenderExporter:
             action = getattr(animation_data, "action", None) if animation_data else None
             if action is None:
                 continue
+            for segment in _physics_object_sequence_ranges(owner, action) if isinstance(owner, bpy.types.Object) else _physics_load_action_segments(action):
+                clip = self._clip_spec_from_action_segment(segment, action, owner)
+                key = (
+                    sanitized_file_stem(clip.file_stem or clip.name).lower(),
+                    clip.frame_start,
+                    clip.frame_end,
+                )
+                if key in segment_specs:
+                    segment_specs[key] = self._merge_clip_specs(segment_specs[key], clip)
+                else:
+                    segment_specs[key] = clip
             clip_start, clip_end = self._action_frame_range(action)
             start_frame = clip_start if start_frame is None else min(start_frame, clip_start)
             end_frame = clip_end if end_frame is None else max(end_frame, clip_end)
             action_sources.append((owner, action))
             if action.name not in names:
                 names.append(action.name)
+
+        if segment_specs:
+            for clip in legacy_specs:
+                key = (
+                    sanitized_file_stem(clip.file_stem or clip.name).lower(),
+                    clip.frame_start,
+                    clip.frame_end,
+                )
+                if key in segment_specs:
+                    segment_specs[key] = self._merge_clip_specs(segment_specs[key], clip)
+                else:
+                    segment_specs[key] = clip
+            return sorted(segment_specs.values(), key=lambda clip: (clip.frame_start, clip.frame_end, clip.name.lower()))
 
         if not action_sources or start_frame is None or end_frame is None:
             return legacy_specs
@@ -2418,7 +3449,9 @@ class GOHBlenderExporter:
                 sources.append(("Basis settings", lines))
         if self.basis_helper is not None:
             _flags, values = self._legacy_entries(self.basis_helper)
-            helper_lines = values.get("animation", []) + values.get("animationresume", [])
+            helper_lines: list[str] = []
+            for legacy_key in ("animation", "animationresume", "animationauto"):
+                helper_lines.extend(f"{legacy_key}={value}" for value in values.get(legacy_key, []))
             if helper_lines:
                 sources.append((self.basis_helper.name, helper_lines))
 
@@ -2437,6 +3470,8 @@ class GOHBlenderExporter:
             lower_text = text.lower()
             if lower_text.startswith("animationresume="):
                 key = "animationresume"
+            elif lower_text.startswith("animationauto="):
+                key = "animationauto"
             elif lower_text.startswith("animation="):
                 key = "animation"
             else:
@@ -2470,6 +3505,7 @@ class GOHBlenderExporter:
                     file_stem=file_stem,
                     speed=speed,
                     resume=key == "animationresume",
+                    autostart=key == "animationauto",
                 )
             )
         return clips
@@ -2484,6 +3520,31 @@ class GOHBlenderExporter:
         sources = [strip, action, owner, self.context.scene]
         default_name = strip.name or action.name or getattr(owner, "name", self.model_name)
         return self._clip_spec(default_name, start_frame, end_frame, sources)
+
+    def _clip_spec_from_action_segment(
+        self,
+        segment: dict[str, object],
+        action: bpy.types.Action,
+        owner,
+    ) -> AnimationClipSpec:
+        sources = [action, owner, self.context.scene]
+        name = sanitized_file_stem(str(segment.get("name") or "").strip()) or action.name or self.model_name
+        file_stem = sanitized_file_stem(str(segment.get("file_stem") or name).strip()) or name
+        start_frame = int(segment.get("frame_start", 0))
+        end_frame = int(segment.get("frame_end", start_frame))
+        speed = self._first_custom_float(sources, "goh_sequence_speed")
+        smooth = self._first_custom_float(sources, "goh_sequence_smooth")
+        return AnimationClipSpec(
+            name=name,
+            frame_start=min(start_frame, end_frame),
+            frame_end=max(start_frame, end_frame),
+            file_stem=file_stem,
+            speed=1.0 if speed is None else speed,
+            smooth=0.0 if smooth is None else smooth,
+            resume=self._any_custom_bool(sources, "goh_sequence_resume"),
+            autostart=self._any_custom_bool(sources, "goh_sequence_autostart"),
+            store=self._any_custom_bool(sources, "goh_sequence_store"),
+        )
 
     def _clip_spec(
         self,
@@ -4176,6 +5237,9 @@ class GOHBlenderExporter:
         value = bool(self._custom_get(owner, key))
         if value:
             return True
+        for alias in GOH_CUSTOM_BOOL_ALIASES.get(key, ()):
+            if bool(self._custom_get(owner, alias)):
+                return True
         flag_names = GOH_LEGACY_BOOL_FLAGS.get(key)
         if flag_names and self._legacy_has_flag(owner, *flag_names):
             return True
@@ -4741,14 +5805,23 @@ class GOHModelImporter:
         self.imported_objects: list[bpy.types.Object] = []
         self.root_collection: bpy.types.Collection | None = None
         self.volume_collection: bpy.types.Collection | None = None
+        self.obstacle_collection: bpy.types.Collection | None = None
+        self.area_collection: bpy.types.Collection | None = None
 
     def import_model(self) -> tuple[int, list[str]]:
         model = read_model(self.input_path)
         self.root_collection = self._ensure_child_collection(f"GOH_{self.input_path.stem}", self.context.scene.collection)
-        self.volume_collection = self._ensure_child_collection("GOH_VOLUMES", self.root_collection)
+        if self.operator.import_volumes:
+            self.volume_collection = self._ensure_child_collection("GOH_VOLUMES", self.root_collection)
+        if self.operator.import_shapes:
+            self.obstacle_collection = self._ensure_child_collection("GOH_OBSTACLES", self.root_collection)
+            self.area_collection = self._ensure_child_collection("GOH_AREAS", self.root_collection)
         self._import_bone_node(model.basis, None)
         if self.operator.import_volumes:
             self._import_volumes(model.volumes)
+        if self.operator.import_shapes:
+            self._import_shape2d_entries(model.obstacles, is_obstacle=True)
+            self._import_shape2d_entries(model.areas, is_obstacle=False)
         for obj in self.imported_objects:
             obj["goh_source_mdl"] = str(self.input_path)
             obj["goh_import_axis_mode"] = self.operator.axis_mode
@@ -4880,10 +5953,106 @@ class GOHModelImporter:
             obj["goh_volume_name"] = volume.entry_name
             obj["goh_volume_bone"] = volume.bone_name or ""
             obj["goh_volume_kind"] = volume.volume_kind
+            if (volume.volume_kind or "").lower() == "cylinder":
+                obj["goh_volume_axis"] = "z"
             obj.display_type = "WIRE"
             obj.hide_render = True
             if self.volume_collection is not None and self.volume_collection.objects.get(obj.name) is None:
                 self.volume_collection.objects.link(obj)
+
+    def _import_shape2d_entries(self, entries: list[Shape2DEntry], *, is_obstacle: bool) -> None:
+        collection = self.obstacle_collection if is_obstacle else self.area_collection
+        role_name = "obstacle" if is_obstacle else "area"
+        flag_name = "goh_is_obstacle" if is_obstacle else "goh_is_area"
+        name_prop = "goh_obstacle_name" if is_obstacle else "goh_area_name"
+        for entry in entries:
+            obj = self._create_shape2d_object(entry, role_name)
+            obj[flag_name] = True
+            obj[name_prop] = entry.entry_name
+            obj["goh_shape_name"] = entry.entry_name
+            obj["goh_shape_2d"] = (entry.shape_type or "Obb2").strip().lower()
+            if entry.rotate:
+                obj["goh_rotate_2d"] = True
+            if entry.tags:
+                obj["goh_tags"] = entry.tags
+            obj.display_type = "WIRE"
+            obj.show_in_front = True
+            obj.hide_render = True
+            if collection is not None and collection.objects.get(obj.name) is None:
+                collection.objects.link(obj)
+
+    def _create_shape2d_object(self, entry: Shape2DEntry, role_name: str) -> bpy.types.Object:
+        shape_type = (entry.shape_type or "Obb2").strip().lower()
+        safe_name = sanitized_file_stem(entry.entry_name or role_name) or role_name
+        object_name = f"{safe_name}_{role_name}"
+        if shape_type == "circle2":
+            center = entry.center or (0.0, 0.0)
+            radius = self._decode_length(entry.radius or 1.0)
+            vertices: list[Vector] = []
+            segments = 32
+            for segment in range(segments):
+                theta = 2.0 * math.pi * segment / segments
+                vertices.append(Vector((math.cos(theta) * radius, math.sin(theta) * radius, 0.0)))
+            faces: list[tuple[int, ...]] = [tuple(range(segments))]
+            matrix = self._shape2d_frame_matrix(center, (1.0, 0.0))
+        elif shape_type == "polygon2":
+            points = entry.vertices
+            if not points and entry.center and entry.extent:
+                cx, cy = entry.center
+                ex, ey = entry.extent
+                points = [(cx - ex, cy - ey), (cx + ex, cy - ey), (cx + ex, cy + ey), (cx - ex, cy + ey)]
+            vertices = [self._decode_point((point[0], point[1], 0.0)) for point in points]
+            faces = [tuple(range(len(vertices)))] if len(vertices) >= 3 else []
+            matrix = Matrix.Identity(4)
+        else:
+            center = entry.center or (0.0, 0.0)
+            extent = entry.extent or (0.5, 0.5)
+            ex = self._decode_length(extent[0])
+            ey = self._decode_length(extent[1])
+            vertices = [
+                Vector((-ex, -ey, 0.0)),
+                Vector((ex, -ey, 0.0)),
+                Vector((ex, ey, 0.0)),
+                Vector((-ex, ey, 0.0)),
+            ]
+            faces = [(0, 1, 2, 3)]
+            matrix = self._shape2d_frame_matrix(center, entry.axis or (1.0, 0.0))
+
+        mesh = bpy.data.meshes.new(f"{object_name}_mesh")
+        mesh.from_pydata(vertices, [], faces)
+        mesh.update()
+        obj = bpy.data.objects.new(object_name, mesh)
+        self._link_object(obj)
+        obj.matrix_world = matrix
+        return obj
+
+    def _shape2d_frame_matrix(self, center: tuple[float, float], axis: tuple[float, float]) -> Matrix:
+        axis_go = Vector((float(axis[0]), float(axis[1]), 0.0))
+        if axis_go.length <= EPSILON:
+            axis_go = Vector((1.0, 0.0, 0.0))
+        axis_go.normalize()
+        perp_go = Vector((-axis_go.y, axis_go.x, 0.0))
+        z_go = Vector((0.0, 0.0, 1.0))
+        inverse_axis = self.axis_rotation.to_3x3().inverted()
+        axis_bl = inverse_axis @ axis_go
+        perp_bl = inverse_axis @ perp_go
+        z_bl = inverse_axis @ z_go
+        if axis_bl.length <= EPSILON:
+            axis_bl = Vector((1.0, 0.0, 0.0))
+        if perp_bl.length <= EPSILON:
+            perp_bl = Vector((0.0, 1.0, 0.0))
+        if z_bl.length <= EPSILON:
+            z_bl = Vector((0.0, 0.0, 1.0))
+        axis_bl.normalize()
+        perp_bl.normalize()
+        z_bl.normalize()
+        matrix = Matrix.Identity(4)
+        for row in range(3):
+            matrix[row][0] = axis_bl[row]
+            matrix[row][1] = perp_bl[row]
+            matrix[row][2] = z_bl[row]
+        matrix.translation = self._decode_point((center[0], center[1], 0.0))
+        return matrix
 
     def _create_volume_object(self, volume: VolumeData) -> bpy.types.Object:
         kind = (volume.volume_kind or "polyhedron").lower()
@@ -5218,6 +6387,7 @@ class IMPORT_SCENE_OT_goh_model(Operator, ImportHelper):
     import_materials: BoolProperty(name="Import Materials", default=True)
     load_textures: BoolProperty(name="Load Diffuse Textures", default=True)
     import_volumes: BoolProperty(name="Import Volumes", default=True)
+    import_shapes: BoolProperty(name="Import Obstacles / Areas", default=True)
     import_lod0_only: BoolProperty(name="LOD0 Only", default=True)
 
     def draw(self, _context: bpy.types.Context) -> None:
@@ -5228,6 +6398,7 @@ class IMPORT_SCENE_OT_goh_model(Operator, ImportHelper):
         layout.prop(self, "import_materials")
         layout.prop(self, "load_textures")
         layout.prop(self, "import_volumes")
+        layout.prop(self, "import_shapes")
         layout.prop(self, "import_lod0_only")
 
     def execute(self, context: bpy.types.Context):
@@ -5447,11 +6618,13 @@ class OBJECT_OT_goh_weapon_tool(Operator):
                 continue
             if self.action == "COMMONMESH":
                 _set_custom_bool_prop(obj, "goh_force_mesh_animation", True)
+                _set_custom_bool_prop(obj, "goh_force_commonmesh", True)
                 obj["CommonMesh"] = True
                 _remove_custom_prop(obj, "Poly")
             elif self.action == "POLY":
                 _clear_helper_state(context.scene, obj, clear_collections=True)
                 _remove_custom_prop(obj, "goh_force_mesh_animation")
+                _remove_custom_prop(obj, "goh_force_commonmesh")
                 obj["Poly"] = True
                 _remove_custom_prop(obj, "CommonMesh")
                 _remove_custom_prop(obj, "Volume")
@@ -5466,6 +6639,7 @@ class OBJECT_OT_goh_weapon_tool(Operator):
                 obj["Volume"] = True
                 _remove_custom_prop(obj, "Poly")
                 _remove_custom_prop(obj, "CommonMesh")
+                _remove_custom_prop(obj, "goh_force_commonmesh")
             elif self.action == "SELECT_VOL":
                 _clear_helper_state(context.scene, obj, clear_collections=True)
                 obj.name = "Select_vol"
@@ -5477,6 +6651,7 @@ class OBJECT_OT_goh_weapon_tool(Operator):
                 obj["Volume"] = True
                 _remove_custom_prop(obj, "Poly")
                 _remove_custom_prop(obj, "CommonMesh")
+                _remove_custom_prop(obj, "goh_force_commonmesh")
             elif self.action == "FORESIGHT3":
                 obj.name = "Foresight3"
                 _set_custom_text_prop(obj, "goh_bone_name", "Foresight3")
@@ -5599,6 +6774,14 @@ class SCENE_OT_goh_validate_scene(Operator):
             if obj.type == "MESH":
                 if not obj.material_slots:
                     warnings.append(f'Mesh "{obj.name}" has no material slot.')
+                if obj.material_slots and not obj.data.uv_layers:
+                    warnings.append(f'Mesh "{obj.name}" has materials but no UV map.')
+                if not obj.data.polygons:
+                    warnings.append(f'Mesh "{obj.name}" has no faces.')
+                else:
+                    zero_area_count = sum(1 for polygon in obj.data.polygons if polygon.area <= EPSILON)
+                    if zero_area_count:
+                        warnings.append(f'Mesh "{obj.name}" has {zero_area_count} zero-area face(s).')
                 if any(abs(value - 1.0) > 1e-4 for value in obj.scale):
                     warnings.append(f'Mesh "{obj.name}" has unapplied object scale.')
                 lod_value = str(obj.get("goh_lod_files") or "").strip()
@@ -5623,8 +6806,51 @@ class SCENE_OT_goh_validate_scene(Operator):
                 errors.append(f'Volume "{obj.name}" has unsupported goh_volume_kind "{volume_kind}".')
             if not str(obj.get("goh_volume_bone") or "").strip() and not obj.name.lower().endswith("_vol"):
                 warnings.append(f'Volume "{obj.name}" has no goh_volume_bone and cannot derive one from _vol naming.')
+            if volume_kind == "cylinder":
+                axis = str(obj.get("goh_volume_axis") or "").strip().lower()
+                if axis not in {"x", "y", "z"}:
+                    warnings.append(f'Cylinder volume "{obj.name}" has no valid goh_volume_axis; default export axis is Z.')
             if volume_kind == "polyhedron" and obj.type == "MESH" and len(obj.data.vertices) > 65535:
                 info.append(f'Volume "{obj.name}" exceeds 65535 vertices and will be split into multiple .vol files.')
+
+        for obj in objects:
+            if not (_is_tool_obstacle_object(obj) or _is_tool_area_object(obj)):
+                continue
+            shape_type = str(obj.get("goh_shape_2d") or "obb2").strip().lower()
+            if shape_type not in {"obb2", "circle2", "polygon2"}:
+                errors.append(f'Shape helper "{obj.name}" has unsupported goh_shape_2d "{shape_type}".')
+            if obj.type == "MESH" and shape_type == "polygon2" and len(obj.data.vertices) < 3:
+                warnings.append(f'Polygon2 helper "{obj.name}" has fewer than three vertices.')
+            if not str(obj.get("goh_shape_name") or "").strip():
+                warnings.append(f'Shape helper "{obj.name}" has no goh_shape_name and will export using the object name.')
+
+        for obj in objects:
+            animation_data = getattr(obj, "animation_data", None)
+            action = getattr(animation_data, "action", None) if animation_data else None
+            segments = _physics_object_sequence_ranges(obj, action)
+            if not segments:
+                continue
+            sorted_segments = sorted(
+                segments,
+                key=lambda item: (int(item.get("frame_start", 0)), int(item.get("frame_end", 0))),
+            )
+            for segment in sorted_segments:
+                start = int(segment.get("frame_start", 0))
+                end = int(segment.get("frame_end", start))
+                if start < 0 or end < 0:
+                    warnings.append(f'Object "{obj.name}" has negative GOH sequence range frames.')
+                if start == end:
+                    warnings.append(f'Object "{obj.name}" has one-frame GOH sequence range "{segment.get("name", "")}".')
+            for left, right in zip(sorted_segments, sorted_segments[1:]):
+                left_start = int(left.get("frame_start", 0))
+                left_end = int(left.get("frame_end", left_start))
+                right_start = int(right.get("frame_start", 0))
+                right_end = int(right.get("frame_end", right_start))
+                if _physics_ranges_overlap(left_start, left_end, right_start, right_end):
+                    warnings.append(
+                        f'Object "{obj.name}" has overlapping GOH sequence ranges '
+                        f'"{left.get("name", "")}" and "{right.get("name", "")}".'
+                    )
 
         for material in materials:
             if not _material_has_goh_texture(material):
@@ -5799,13 +7025,19 @@ class OBJECT_OT_goh_create_recoil_action(Operator):
                 direction = local_axis
             direction.normalize()
             offset = direction * float(settings.recoil_distance)
-            action_name = f"goh_recoil_{sanitized_file_stem(obj.name)}"
 
             obj.animation_data_create()
             previous_action = getattr(obj.animation_data, "action", None)
-            action = bpy.data.actions.new(action_name)
-            obj.animation_data.action = action
             sequence_name, file_stem = _physics_sequence_names("recoil", previous_action, obj)
+            action = _physics_prepare_action(
+                obj,
+                "goh_recoil",
+                sequence_name,
+                file_stem,
+                start=start,
+                end=end,
+                data_paths={"location"},
+            )
             obj.location = original_location
             obj.keyframe_insert(data_path="location", frame=start)
             obj.location = original_location + _object_local_offset_from_world(obj, offset)
@@ -5858,6 +7090,9 @@ class OBJECT_OT_goh_assign_physics_link(Operator):
             obj["goh_physics_damping"] = damping
             obj["goh_physics_jitter"] = jitter
             obj["goh_physics_rotation"] = rotation
+            if settings.physics_link_role == "ANTENNA_WHIP":
+                obj["goh_antenna_root_anchor"] = float(settings.physics_antenna_root_anchor)
+                obj["goh_antenna_segments"] = int(settings.physics_antenna_segments)
             count += 1
         if count == 0:
             self.report({"WARNING"}, "Select at least one linked object in addition to the active source.")
@@ -5911,6 +7146,7 @@ class OBJECT_OT_goh_bake_linked_recoil(Operator):
             sequence_name=sequence_name,
             file_stem=file_stem,
             write_object_sequence=settings.recoil_set_sequence,
+            create_nla=settings.physics_create_nla_clips,
             clip_end=end,
         )
         for obj in sorted(linked, key=lambda item: item.name.lower()):
@@ -5928,7 +7164,9 @@ class OBJECT_OT_goh_bake_linked_recoil(Operator):
                 settings,
                 sequence_name=linked_sequence_name,
                 file_stem=linked_file_stem,
+                create_nla=settings.physics_create_nla_clips,
                 base_duration=total,
+                source_obj=source,
             )
 
         self.report({"INFO"}, f"Baked linked recoil: source {source.name}, linked parts {len(linked)}.")
@@ -5994,6 +7232,7 @@ class OBJECT_OT_goh_bake_directional_recoil_set(Operator):
                     file_stem=clip_name,
                     create_nla=settings.physics_create_nla_clips,
                     base_duration=total,
+                    source_obj=source,
                 )
 
         context.scene.frame_set(start_base)
@@ -6255,6 +7494,9 @@ class VIEW3D_PT_goh_tools(Panel):
         physics_box.prop(settings, "physics_link_damping")
         physics_box.prop(settings, "physics_link_jitter")
         physics_box.prop(settings, "physics_link_rotation")
+        if settings.physics_link_role == "ANTENNA_WHIP":
+            physics_box.prop(settings, "physics_antenna_root_anchor")
+            physics_box.prop(settings, "physics_antenna_segments")
         physics_box.prop(settings, "physics_include_scene_links")
         row = physics_box.row(align=True)
         row.operator(OBJECT_OT_goh_assign_physics_link.bl_idname, text="Assign Physics Link")

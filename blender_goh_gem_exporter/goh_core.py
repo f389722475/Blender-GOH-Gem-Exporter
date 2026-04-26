@@ -351,6 +351,8 @@ def write_mesh(path: str | Path, mesh: MeshData, materials: dict[str, MaterialDe
     max_influences = _mesh_max_influences(mesh) if skinned else 0
     if skinned and max_influences < 1:
         max_influences = 1
+    if skinned and len(mesh.skinned_bones) > 0xFF:
+        raise ExportError(f"Mesh {mesh.file_name} uses more than 255 skin bones.")
     if skinned and max_influences > 5:
         raise ExportError(f"Mesh {mesh.file_name} uses more than 5 skin influences.")
 
