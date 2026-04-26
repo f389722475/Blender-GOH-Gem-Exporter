@@ -48,7 +48,7 @@ from .goh_core import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
-GOH_ADDON_VERSION = "1.0.1"
+GOH_ADDON_VERSION = "1.1.0"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),
@@ -1289,8 +1289,6 @@ def _physics_role_duration_frames(settings: GOHToolSettings, role: str, base_fra
 
 
 def _physics_link_response_frames(settings: GOHToolSettings, role: str, base_frames: int) -> int:
-    if role == "ANTENNA_WHIP":
-        return max(1, int(base_frames))
     return _physics_role_duration_frames(settings, role, base_frames)
 
 
@@ -1385,14 +1383,24 @@ def _physics_antenna_modal_response(normalized_time: float, frequency: float, da
     t = max(0.0, min(1.0, normalized_time))
     if t <= 0.0:
         return 0.0
-    modal_frequency = max(1.35, min(2.15, 1.48 + max(0.0, frequency) * 0.095))
-    damping_ratio = max(0.11, min(0.38, damping * 0.72 + 0.045))
+    modal_frequency = max(1.18, min(1.72, 1.16 + max(0.0, frequency) * 0.055))
+    damping_ratio = max(0.10, min(0.28, damping * 0.52 + 0.035))
     spring = _underdamped_impulse(t, modal_frequency, damping_ratio, 0.0)
-    after_sway = _underdamped_impulse(t, modal_frequency * 0.58, damping_ratio + 0.10, 0.0)
-    muzzle_kick = _critically_damped_kick(t, 9.2)
-    settle_fade = 1.0 - _smoothstep5((t - 0.92) / 0.08)
+    after_sway = _underdamped_impulse(t, modal_frequency * 0.54, damping_ratio + 0.08, 0.15)
+    muzzle_kick = _critically_damped_kick(t, 8.4)
     attack = 1.0 - math.exp(-8.0 * t)
-    return (spring * 1.18 + after_sway * 0.12 + muzzle_kick * 0.18) * settle_fade * attack
+    return (spring * 1.04 + after_sway * 0.18 + muzzle_kick * 0.16) * attack
+
+
+def _physics_antenna_late_rebound_response(normalized_time: float, frequency: float, damping: float) -> float:
+    t = max(0.0, min(1.0, normalized_time))
+    if t <= 0.0:
+        return 0.0
+    modal_frequency = max(2.05, min(2.78, 1.92 + max(0.0, frequency) * 0.075))
+    damping_ratio = max(0.075, min(0.22, damping * 0.34 + 0.045))
+    primary = _underdamped_impulse(t, modal_frequency, damping_ratio, 0.32)
+    secondary = _underdamped_impulse(t, modal_frequency * 0.58, damping_ratio + 0.08, 1.35)
+    return primary * 0.82 + secondary * 0.18
 
 
 def _pendulum_swing(t: float, frequency: float, damping_ratio: float, phase: float = 0.0, attack: float = 6.0) -> float:
@@ -1436,7 +1444,7 @@ def _physics_role_motion(role: str, normalized_time: float, frequency: float, da
         longitudinal = 0.70 * kick + 0.72 * hull_swing - 0.18 * counter_swing
         side = 0.28 * side_swing + 0.09 * side_chatter
         vertical = -0.22 * soft_kick + 0.24 * _pendulum_swing(t, freq * 1.05, damping_ratio + 0.08, 0.25, 5.5)
-        rotation = 0.35 * kick + 1.18 * pitch_swing + 0.42 * counter_swing
+        rotation = -(0.35 * kick + 1.18 * pitch_swing + 0.42 * counter_swing)
         return _fade_role_motion(t, (longitudinal, side, vertical, rotation, 0.30), fade_start=0.94)
     if role == "ANTENNA_WHIP":
         whip = _physics_antenna_modal_response(t, freq, damping_ratio)
@@ -1564,6 +1572,11 @@ def _physics_cantilever_shape(u: float) -> float:
     return u * u * (3.0 - 2.0 * u)
 
 
+def _physics_minimum_bending_shape(u: float) -> float:
+    u = max(0.0, min(1.0, u))
+    return 0.5 * u * u * (3.0 - u)
+
+
 def _physics_cantilever_mode_shape(u: float, beta: float) -> float:
     u = max(0.0, min(1.0, u))
     beta = max(0.1, beta)
@@ -1582,11 +1595,10 @@ def _physics_cantilever_mode_shape(u: float, beta: float) -> float:
 
 def _physics_elastic_rod_shape(u: float) -> float:
     u = max(0.0, min(1.0, u))
-    arc_shape = 1.0 - math.cos(0.5 * math.pi * u)
+    min_energy_shape = _physics_minimum_bending_shape(u)
     first_mode = _physics_cantilever_mode_shape(u, 1.875104068711961)
     smooth_shape = u * u * u * (u * (u * 6.0 - 15.0) + 10.0)
-    cubic_shape = _physics_cantilever_shape(u)
-    return max(0.0, min(1.25, 0.62 * arc_shape + 0.18 * first_mode + 0.12 * smooth_shape + 0.08 * cubic_shape))
+    return max(0.0, min(1.20, 0.74 * min_energy_shape + 0.18 * first_mode + 0.08 * smooth_shape))
 
 
 def _physics_antenna_wave_shape(u: float) -> float:
@@ -1778,6 +1790,7 @@ def _physics_simulate_antenna_spine(
     start: int,
     end: int,
     duration: int,
+    source_duration: int,
     delay: int,
     frequency: float,
     damping: float,
@@ -1798,19 +1811,43 @@ def _physics_simulate_antenna_spine(
     bend_stiffness = max(0.12, min(0.34, 0.20 + damping * 0.12))
     tip_limit = free_length * 0.62
     frame_duration = float(max(1, duration))
+    motion_duration = float(max(1, min(duration, int(round(max(1, source_duration) * 1.20)))))
+    filter_alpha = max(0.42, min(0.64, 14.0 / motion_duration))
+    smoothed_primary_tip = 0.0
+    smoothed_secondary_tip = 0.0
+    smoothed_axial_tip = 0.0
 
     for frame in range(start, end + 1):
         local_frame = frame - start - delay
-        normalized = 0.0 if local_frame <= 0 else max(0.0, min(1.0, local_frame / frame_duration))
-        recoil_modal = _physics_antenna_modal_response(normalized, frequency, damping)
-        recoil_kick = _critically_damped_kick(normalized, 7.2) if local_frame > 0 else 0.0
-        jitter_value = 0.0 if local_frame <= 0 else _deterministic_jitter(obj, frame) * jitter * max(0.0, 1.0 - normalized)
+        motion_time = 0.0 if local_frame <= 0 else max(0.0, min(1.0, local_frame / motion_duration))
+        tail_time = 0.0 if local_frame <= 0 else max(0.0, min(1.0, local_frame / frame_duration))
+        source_modal = _physics_antenna_modal_response(motion_time, frequency, damping)
+        late_rebound = _physics_antenna_late_rebound_response(tail_time, frequency, damping)
+        late_gate = _smoothstep5((tail_time - 0.34) / 0.22)
+        source_gate = 1.0 - 0.92 * _smoothstep5((tail_time - 0.44) / 0.30)
+        recoil_modal = source_modal * source_gate + late_rebound * late_gate * 0.58
+        recoil_kick = _critically_damped_kick(motion_time, 7.2) if local_frame > 0 else 0.0
+        jitter_value = 0.0 if local_frame <= 0 else _deterministic_jitter(obj, frame) * jitter * max(0.0, 1.0 - tail_time)
         angle = math.radians(rotation_degrees) * drive_weight * recoil_modal
-        primary_tip = math.sin(angle) * free_length * 0.46
-        primary_tip += distance * drive_weight * (recoil_modal * 0.72 + recoil_kick * 0.12)
-        primary_tip = _physics_soft_limit(primary_tip, tip_limit)
-        secondary_tip = distance * jitter_value * 0.045
-        axial_tip = distance * recoil_modal * 0.018
+        target_primary_tip = math.sin(angle) * free_length * 0.46
+        target_primary_tip += distance * drive_weight * (recoil_modal * 0.72 + recoil_kick * 0.12)
+        target_primary_tip = _physics_soft_limit(target_primary_tip, tip_limit)
+        target_secondary_tip = distance * jitter_value * 0.025
+        target_axial_tip = distance * recoil_modal * 0.014
+        if local_frame <= 0:
+            smoothed_primary_tip = 0.0
+            smoothed_secondary_tip = 0.0
+            smoothed_axial_tip = 0.0
+        else:
+            smoothed_primary_tip += (target_primary_tip - smoothed_primary_tip) * filter_alpha
+            smoothed_secondary_tip += (target_secondary_tip - smoothed_secondary_tip) * filter_alpha
+            smoothed_axial_tip += (target_axial_tip - smoothed_axial_tip) * filter_alpha
+        end_blend = _smoothstep5((tail_time - 0.84) / 0.16)
+        if frame >= end:
+            end_blend = 1.0
+        primary_tip = smoothed_primary_tip * (1.0 - end_blend)
+        secondary_tip = smoothed_secondary_tip * (1.0 - end_blend)
+        axial_tip = smoothed_axial_tip * (1.0 - end_blend)
         next_points = [point.copy() for point in rest_points]
         for index in range(len(points)):
             if index < pinned_count:
@@ -1827,13 +1864,6 @@ def _physics_simulate_antenna_spine(
             )
         points = next_points
         _physics_apply_antenna_spine_constraints(points, rest_lengths, rest_points, pinned_count, bend_stiffness)
-        end_blend = _smoothstep5((normalized - 0.90) / 0.10)
-        if frame >= end:
-            end_blend = 1.0
-        if end_blend > 0.0:
-            for index in range(len(points)):
-                points[index] = points[index].lerp(rest_points[index], end_blend)
-            _physics_apply_antenna_spine_constraints(points, rest_lengths, rest_points, pinned_count, bend_stiffness)
         frames[frame] = [point.copy() for point in points]
     return frames
 
@@ -2553,6 +2583,7 @@ def _physics_bake_antenna_whip_mesh_response(
         start,
         response_end,
         duration,
+        base_frames,
         delay,
         frequency,
         damping,
@@ -3631,7 +3662,7 @@ class GOHBlenderExporter:
                 frame_states.append(self._sample_armature_frame_state(bone_names))
             else:
                 assert object_map is not None
-                frame_states.append(self._sample_object_frame_state(bone_names, object_map, visual_objects))
+                frame_states.append(self._sample_object_frame_state(bone_names, object_map, visual_objects, clip))
         return frame_states
 
     def _sample_mesh_animation_frames(
@@ -3725,6 +3756,7 @@ class GOHBlenderExporter:
         bone_names: list[str],
         object_map: dict[str, bpy.types.Object],
         visual_objects: set[bpy.types.Object],
+        clip: AnimationClipSpec | None = None,
     ) -> dict[str, AnimationState]:
         frame_state: dict[str, AnimationState] = {}
         for bone_name in bone_names:
@@ -3739,12 +3771,137 @@ class GOHBlenderExporter:
             elif obj.parent is not None and self._is_basis_helper_object(obj.parent):
                 parent_matrix = obj.parent.matrix_world
             local_matrix = parent_matrix.inverted_safe() @ obj.matrix_world
+            local_matrix = self._object_animation_export_matrix(obj, local_matrix, clip)
             loc, rot, _scale = local_matrix.decompose()
             frame_state[bone_name] = AnimationState(
                 matrix=self._matrix_rows(loc, rot.to_matrix()),
                 visible=1 if self._is_object_visible(obj) else 0,
             )
         return frame_state
+
+    def _object_animation_export_matrix(
+        self,
+        obj: bpy.types.Object,
+        local_matrix: Matrix,
+        clip: AnimationClipSpec | None = None,
+    ) -> Matrix:
+        loc_rot_matrix = self._loc_rot_matrix(local_matrix)
+        rest_matrix = self._stored_rest_local_matrix(obj)
+        if rest_matrix is not None:
+            correction = self._deferred_basis_animation_correction_matrix(obj)
+            if correction is not None:
+                return self._correct_deferred_basis_animation_delta(rest_matrix, loc_rot_matrix, correction)
+        return self._physics_link_animation_export_matrix(obj, loc_rot_matrix, rest_matrix, clip)
+
+    def _physics_link_animation_export_matrix(
+        self,
+        obj: bpy.types.Object,
+        loc_rot_matrix: Matrix,
+        rest_matrix: Matrix | None = None,
+        clip: AnimationClipSpec | None = None,
+    ) -> Matrix:
+        role = str(obj.get("goh_physics_role") or "").strip().upper()
+        if not role or role == "SOURCE":
+            return loc_rot_matrix
+        if not self._is_generated_physics_animation(obj, clip):
+            return loc_rot_matrix
+        if rest_matrix is None:
+            return loc_rot_matrix
+        correction = self._physics_link_animation_correction_matrix(obj, rest_matrix)
+        if correction is None:
+            return loc_rot_matrix
+        return self._correct_animation_delta(rest_matrix, loc_rot_matrix, correction)
+
+    def _correct_animation_delta(self, rest_matrix: Matrix, loc_rot_matrix: Matrix, correction: Matrix) -> Matrix:
+        rest_loc_rot = self._loc_rot_matrix(rest_matrix)
+        delta = rest_loc_rot.inverted_safe() @ loc_rot_matrix
+        corrected_delta = correction @ delta @ correction.inverted_safe()
+        return rest_loc_rot @ corrected_delta
+
+    def _correct_deferred_basis_animation_delta(
+        self,
+        rest_matrix: Matrix,
+        loc_rot_matrix: Matrix,
+        correction: Matrix,
+    ) -> Matrix:
+        rest_loc_rot = self._loc_rot_matrix(rest_matrix)
+        delta = rest_loc_rot.inverted_safe() @ loc_rot_matrix
+        delta_loc, delta_rot, _delta_scale = delta.decompose()
+        correction3 = correction.to_3x3()
+        corrected_loc = correction3 @ delta_loc
+        delta_rot_matrix = delta_rot.to_matrix().to_4x4()
+        corrected_rot_matrix = correction @ delta_rot_matrix.inverted_safe() @ correction.inverted_safe()
+        return rest_loc_rot @ Matrix.Translation(corrected_loc) @ corrected_rot_matrix
+
+    def _deferred_basis_animation_correction_matrix(self, obj: bpy.types.Object) -> Matrix | None:
+        basis = self._basis_helper_ancestor(obj)
+        if basis is None or not basis.get("goh_deferred_basis_flip"):
+            return None
+        basis_rest = self._stored_rest_local_matrix(basis)
+        if basis_rest is None or not self._matrix_is_mirrored(basis_rest):
+            return None
+        return self._basis_rotation_matrix().to_4x4()
+
+    def _physics_link_animation_correction_matrix(self, obj: bpy.types.Object, rest_matrix: Matrix) -> Matrix | None:
+        correction = Matrix.Identity(4)
+        corrected = False
+        basis = self._basis_helper_ancestor(obj)
+        if basis is not None and self._basis_helper_displays_mirrored_space(basis):
+            correction = self._basis_rotation_matrix().to_4x4() @ correction
+            corrected = True
+        local_reflection = self._local_rest_reflection_matrix(rest_matrix)
+        if local_reflection is not None:
+            correction = correction @ local_reflection
+            corrected = True
+        return correction if corrected else None
+
+    def _basis_helper_ancestor(self, obj: bpy.types.Object) -> bpy.types.Object | None:
+        parent = obj.parent
+        while parent is not None:
+            if self._is_basis_helper_object(parent):
+                return parent
+            parent = parent.parent
+        return None
+
+    def _basis_helper_displays_mirrored_space(self, obj: bpy.types.Object) -> bool:
+        if obj.get("goh_deferred_basis_flip"):
+            return False
+        return self._matrix_is_mirrored(obj.matrix_world)
+
+    def _is_generated_physics_animation(self, obj: bpy.types.Object, clip: AnimationClipSpec | None) -> bool:
+        names: list[str] = []
+        if clip is not None:
+            names.extend(name for name in (clip.name, clip.file_stem) if name)
+        animation_data = getattr(obj, "animation_data", None)
+        action = getattr(animation_data, "action", None) if animation_data else None
+        if action is not None:
+            names.append(action.name)
+        if animation_data is not None and getattr(animation_data, "use_nla", False):
+            for track in animation_data.nla_tracks:
+                if track.mute:
+                    continue
+                for strip in track.strips:
+                    if strip.mute:
+                        continue
+                    names.append(strip.name)
+                    strip_action = getattr(strip, "action", None)
+                    if strip_action is not None:
+                        names.append(strip_action.name)
+        prefixes = tuple(prefix.lower() for prefix in GOH_PHYSICS_ACTION_PREFIXES)
+        return any(str(name).strip().lower().startswith(prefixes) for name in names)
+
+    def _local_rest_reflection_matrix(self, rest_matrix: Matrix) -> Matrix | None:
+        if not self._matrix_is_mirrored(rest_matrix):
+            return None
+        rest_loc_rot = self._loc_rot_matrix(rest_matrix)
+        scale_space = rest_loc_rot.inverted_safe() @ rest_matrix
+        reflection = scale_space.to_3x3().normalized()
+        if reflection.determinant() >= -EPSILON:
+            return None
+        return reflection.to_4x4()
+
+    def _matrix_is_mirrored(self, matrix: Matrix) -> bool:
+        return matrix.to_3x3().determinant() < -EPSILON
 
     def _is_object_visible(self, obj: bpy.types.Object) -> bool:
         try:
@@ -3786,7 +3943,19 @@ class GOHBlenderExporter:
         if cached is not None:
             parent_matrix = self._export_world_matrix(obj.parent)
             return parent_matrix @ cached
+        if obj.parent is not None and self._has_deferred_basis_ancestor(obj):
+            parent_matrix = self._export_world_matrix(obj.parent)
+            local_matrix = obj.parent.matrix_world.inverted_safe() @ obj.matrix_world
+            return parent_matrix @ local_matrix
         return obj.matrix_world.copy()
+
+    def _has_deferred_basis_ancestor(self, obj: bpy.types.Object) -> bool:
+        parent = obj.parent
+        while parent is not None:
+            if self._is_basis_helper_object(parent):
+                return bool(parent.get("goh_deferred_basis_flip"))
+            parent = parent.parent
+        return False
 
     def _stored_rest_local_matrix(self, obj: bpy.types.Object | None) -> Matrix | None:
         if obj is None:
@@ -5799,6 +5968,7 @@ class GOHModelImporter:
         self.input_dir = self.input_path.parent
         self.axis_rotation = self._axis_rotation_matrix(operator.axis_mode)
         self.scale_factor = operator.scale_factor
+        self.defer_basis_flip = bool(getattr(operator, "defer_basis_flip", True))
         self.warnings: list[str] = []
         self.material_cache: dict[str, bpy.types.Material] = {}
         self.bone_objects: dict[str, bpy.types.Object] = {}
@@ -5831,6 +6001,8 @@ class GOHModelImporter:
 
     def _import_bone_node(self, bone: BoneNode, parent: bpy.types.Object | None) -> bpy.types.Object:
         local_matrix = self._decode_matrix_rows(bone.matrix or self._identity_matrix_rows())
+        defer_basis_flip = self._should_defer_basis_flip(bone, parent, local_matrix)
+        display_matrix = self._deferred_basis_display_matrix(local_matrix) if defer_basis_flip else local_matrix
         views = list(bone.mesh_views)
         if not views and bone.volume_view:
             views = [MeshViewDef(bone.volume_view, bone.volume_flags, bone.layer)]
@@ -5855,7 +6027,7 @@ class GOHModelImporter:
             obj["goh_bone_name"] = bone.name
             obj["goh_import_mesh"] = view.file_name
             if primary is None:
-                self._set_parent_and_matrix(obj, parent, local_matrix)
+                self._set_parent_and_matrix(obj, parent, local_matrix, display_matrix=display_matrix)
                 primary = obj
                 self.bone_objects[bone.name] = obj
             else:
@@ -5869,8 +6041,12 @@ class GOHModelImporter:
             primary.empty_display_size = 0.35
             primary["goh_bone_name"] = bone.name
             self._link_object(primary)
-            self._set_parent_and_matrix(primary, parent, local_matrix)
+            self._set_parent_and_matrix(primary, parent, local_matrix, display_matrix=display_matrix)
             self.bone_objects[bone.name] = primary
+
+        if defer_basis_flip:
+            primary["goh_basis_helper"] = True
+            primary["goh_deferred_basis_flip"] = True
 
         if bone.bone_type:
             primary["goh_bone_type"] = bone.bone_type
@@ -5884,6 +6060,21 @@ class GOHModelImporter:
         for child in bone.children:
             self._import_bone_node(child, primary)
         return primary
+
+    def _should_defer_basis_flip(self, bone: BoneNode, parent: bpy.types.Object | None, local_matrix: Matrix) -> bool:
+        if not self.defer_basis_flip:
+            return False
+        if self.operator.axis_mode != "NONE":
+            return False
+        if parent is not None:
+            return False
+        if bone.name.lower() != GOH_BASIS_HELPER_NAME.lower():
+            return False
+        return local_matrix.to_3x3().determinant() < -EPSILON
+
+    def _deferred_basis_display_matrix(self, local_matrix: Matrix) -> Matrix:
+        location = local_matrix.to_translation()
+        return Matrix.Translation(location)
 
     def _create_mesh_object(self, object_name: str, mesh_data: MeshData) -> bpy.types.Object:
         vertices = [self._decode_point(vertex.position) for vertex in mesh_data.vertices]
@@ -6240,13 +6431,21 @@ class GOHModelImporter:
         parent.children.link(collection)
         return collection
 
-    def _set_parent_and_matrix(self, obj: bpy.types.Object, parent: bpy.types.Object | None, local_matrix: Matrix) -> None:
+    def _set_parent_and_matrix(
+        self,
+        obj: bpy.types.Object,
+        parent: bpy.types.Object | None,
+        local_matrix: Matrix,
+        *,
+        display_matrix: Matrix | None = None,
+    ) -> None:
+        applied_matrix = display_matrix if display_matrix is not None else local_matrix
         obj.parent = parent
         if parent is None:
-            obj.matrix_world = local_matrix
+            obj.matrix_world = applied_matrix
         else:
             obj.matrix_parent_inverse = Matrix.Identity(4)
-            obj.matrix_local = local_matrix
+            obj.matrix_local = applied_matrix
         self._store_rest_local_matrix(obj, local_matrix)
 
     def _store_rest_local_matrix(self, obj: bpy.types.Object, local_matrix: Matrix) -> None:
@@ -6389,6 +6588,11 @@ class IMPORT_SCENE_OT_goh_model(Operator, ImportHelper):
     import_volumes: BoolProperty(name="Import Volumes", default=True)
     import_shapes: BoolProperty(name="Import Obstacles / Areas", default=True)
     import_lod0_only: BoolProperty(name="LOD0 Only", default=True)
+    defer_basis_flip: BoolProperty(
+        name="Defer Basis Flip",
+        description="Show imported GOH basis bones without the mirror transform in Blender, but keep the stored GOH basis for export",
+        default=True,
+    )
 
     def draw(self, _context: bpy.types.Context) -> None:
         layout = self.layout
@@ -6400,6 +6604,7 @@ class IMPORT_SCENE_OT_goh_model(Operator, ImportHelper):
         layout.prop(self, "import_volumes")
         layout.prop(self, "import_shapes")
         layout.prop(self, "import_lod0_only")
+        layout.prop(self, "defer_basis_flip")
 
     def execute(self, context: bpy.types.Context):
         importer = GOHModelImporter(context, self)
