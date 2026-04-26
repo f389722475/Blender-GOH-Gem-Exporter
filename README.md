@@ -6,7 +6,7 @@
 
 It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds Max GOH workflows while keeping the authoring experience Blender-native.
 
-Current stable release: `1.0.1`.
+Current release: `1.1.0`.
 
 ## Highlights
 
@@ -23,7 +23,8 @@ Current stable release: `1.0.1`.
 - Auto-fill GOH material texture fields from Blender image texture names
 - Generate LOD file lists, bounds-based volume helpers, baked recoil actions, and directional fire clips
 - Bake linked recoil, impact shake, and armor ripple mesh-animation effects
-- `Antenna Whip` now bakes rooted antenna mesh deformation with source-axis front-back sway, smooth linear shape-key playback, and natural multi-bounce recoil follow-through
+- `Antenna Whip` now bakes rooted antenna mesh deformation with a minimum-energy cubic beam curve, source-axis front-back sway, smooth linear shape-key playback, and natural long-tail recoil follow-through
+- Imported GOH `basis` mirror transforms can now be deferred so Blender, SOEdit, and in-game animation playback stay aligned while export still writes the required GOH coordinate flip and ANM pitch parity
 
 ## Repository Layout
 
@@ -146,7 +147,7 @@ When one object contains several baked ranges, `goh_sequence_ranges = fire:1-48;
 
 Use `Physics Power` around `1.4-2.2` when you need heavier cannon recoil or more visible movement.
 Use `Duration Scale` below `1.0` for snappy small-caliber motion, or above `1.0` for heavy hull recovery and antenna follow-through.
-`Body Spring` is tuned for Sherman-style cannon recoil: a hard initial shove followed by smaller damped pitch and side reversals.
+`Body Spring` is tuned for Sherman-style cannon recoil: a hard initial shove followed by a nose-up hull swing, then smaller damped pitch and side reversals.
 For impact effects, use `Bake Impact Response`.
 For visible surface deformation, put the 3D Cursor on the hit area and run `Create Armor Ripple` on the mesh.
 
@@ -163,9 +164,10 @@ The importer reads:
 - `.mtl` material metadata and local diffuse texture files when Blender can load them
 - `.vol` polyhedron collision helpers plus inline `Box`, `Sphere`, and `Cylinder` volume blocks
 
-Recommended import settings for SOEdit-style round trips are `Axis Conversion = None / GOH Native`, `Scale Factor = 20`, and `Flip V = On`.
+Recommended import settings for SOEdit-style round trips are `Axis Conversion = None / GOH Native`, `Scale Factor = 20`, `Flip V = On`, and `Defer Basis Flip = On`.
 Use `LOD0 Only` for quick model viewing, or disable it when you want to inspect all referenced LOD meshes.
 When importing `.anm` clips after a whole `.mdl`, leave animation `Axis Conversion` on `Auto / Match Imported Model` so transforms use the same coordinate space as the model.
+With `Defer Basis Flip` enabled, imported GOH root/basis mirror matrices are stored for export but displayed as a non-mirrored Blender parent. ANM export converts both translation and rotation deltas back into GOH space, including pitch parity, so hand-authored Blender animation matches SOEdit and game playback instead of being visually inverted during editing.
 
 ## Legacy Max Compatibility
 
@@ -207,7 +209,7 @@ Compatibility rules:
 3. Select the zip file.
 4. Enable `GOH GEM Exporter`
 
-The official release asset is `blender_goh_gem_exporter-1.0.1.zip`.
+The official release asset is `blender_goh_gem_exporter-1.1.0.zip`.
 For a cleaner release-ready package, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Recommended Round-Trip Export Settings
@@ -244,6 +246,7 @@ python -X utf8 tests\smoke_test.py
 - [Quick Start](docs/QUICK_START.md)
 - [Physics Bake Workflow](docs/PHYSICS_BAKE.md)
 - [Official Max Plugin Compatibility Notes](docs/OFFICIAL_MAX_PLUGIN_NOTES.md)
+- [v1.1.0 Release Notes](docs/RELEASE_NOTES_v1.1.0.md)
 - [v1.0.1 Release Notes](docs/RELEASE_NOTES_v1.0.1.md)
 - [v1.0.0 Release Notes](docs/RELEASE_NOTES_v1.0.0.md)
 

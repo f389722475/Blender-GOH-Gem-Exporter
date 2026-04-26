@@ -6,7 +6,7 @@
 
 它的目标不是简单复刻 3ds Max MultiScript，而是在 Blender 里提供更现代、更结构化的 GOH 模型、碰撞、材质、动画和物理烘焙工作流。
 
-当前稳定版本：`1.0.1`。
+当前发布版本：`1.1.0`。
 
 ## 主要功能
 
@@ -21,14 +21,15 @@
 - 提供 GOH 预设、Basis 面板、Transform block、Weapon helper、Texture helper、材质自动识别和场景校验
 - 导出时生成 `GOH_Export_Manifest.json`，记录文件哈希、数量统计和导出设置
 - 支持 LOD 文件列表、包围盒碰撞辅助体、后坐力动作、方向射击动画、一键物理联结烘焙
+- 导入 GOH `basis` 镜像矩阵时可启用延迟翻转，让 Blender、SOEdit 和游戏内动画方向保持一致，导出时再写回 GOH 需要的坐标翻转和 ANM 俯仰方向补偿
 
 ## 推荐安装
 
 正式发布包里有两个 zip：
 
-- `blender_goh_gem_exporter-1.0.1.zip`
+- `blender_goh_gem_exporter-1.1.0.zip`
   Blender 插件安装包，推荐在 Blender 里直接安装这个文件。
-- `blender_goh_gem_exporter-1.0.1-full.zip`
+- `blender_goh_gem_exporter-1.1.0-full.zip`
   完整源码、文档、测试和示例素材快照，适合 GitHub 发布页或二次开发。
 
 安装步骤：
@@ -36,7 +37,7 @@
 1. 打开 Blender。
 2. 进入 `Edit > Preferences > Add-ons`。
 3. 点击 `Install...`。
-4. 选择 `blender_goh_gem_exporter-1.0.1.zip`。
+4. 选择 `blender_goh_gem_exporter-1.1.0.zip`。
 5. 启用 `GOH GEM Exporter`。
 
 ## Blender 面板
@@ -57,11 +58,13 @@
 推荐从完整 `.mdl` 导入开始：
 
 1. 使用 `Import GOH Model` 打开官方或已有模型。
-2. 保持推荐设置：`Axis Conversion = None / GOH Native`、`Scale Factor = 20`、`Flip V = On`。
+2. 保持推荐设置：`Axis Conversion = None / GOH Native`、`Scale Factor = 20`、`Flip V = On`、`Defer Basis Flip = On`。
 3. 在 Blender 中编辑模型、材质、碰撞、辅助点位或动画。
 4. 用 `GOH Presets` 或自定义属性确认对象角色。
 5. 用 `Validate GOH Scene` 检查导出前常见问题。
 6. 用 `Export GOH Model` 导出回 GOH / SOEdit 可读取的资源。
+
+启用 `Defer Basis Flip` 时，Blender 里会显示正常、不镜像的编辑父级；导出 `.anm` 时插件会把位移和旋转增量转换回 GOH 空间，包括第 8 帧这类车体俯仰方向补偿，避免 Blender 下仰而 SOEdit 上仰。
 
 ## 动画组和 ANM
 
@@ -113,9 +116,9 @@ goh_sequence_file = fire
 - `Duration Scale > 1.0`
   适合重车体回正、天线延迟摆动和更长尾部运动。
 - `Body Spring`
-  适合车体弹簧回正，会产生多次逐渐衰减的摆动。
+适合车体弹簧回正，开炮后先做上仰车体摆动，然后产生多次逐渐衰减的回弹。
 - `Antenna Whip`
-  适合天线、长杆、软连接部件。
+适合天线、长杆、软连接部件。弯曲使用最小弯曲能量风格的三次弹性杆曲线，并保留较长的平滑回弹尾段。
 - `Suspension Bounce` / `Track Rumble`
   适合悬挂压缩、履带和轮组震动。
 

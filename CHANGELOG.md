@@ -2,9 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 1.1.0 - 2026-04-26
 
-- No changes yet.
+### Added
+
+- Added `Defer Basis Flip` to `Import GOH Model`, enabled by default for GOH-native imports. Imported root `basis` mirror transforms are now stored in `goh_rest_matrix_local` for export while Blender displays a non-mirrored editing parent, keeping hand-authored animation direction consistent with SOEdit and in-game playback.
+- Added export handling for new objects parented under a deferred GOH basis, so hand-created Blender parts keep their visible Blender-local transform while the exported MDL still writes the GOH basis orientation.
+- Added ANM export-space conversion for stored-rest objects under a deferred GOH basis. Blender keeps the visible editable animation direction, while exported transform deltas and pitch parity are mirrored into GOH space so SOEdit/game playback matches Blender.
+- Added runtime regression coverage for deferred-basis import/export, deferred-basis animation pitch parity, mirrored-basis physics link export, and source-vs-linked animation direction.
+- Tuned the `Body Spring` linked-physics preset so its dominant early hull swing is nose-up, matching the more natural SOEdit-style recoil result.
+- Tuned `Antenna Whip` mesh deformation with a minimum-bending-energy cubic beam curve blended with the first cantilever mode, so the antenna forms one smooth elastic arc instead of a segmented rod or snake-like wave.
+
+### Fixed
+
+- Fixed mirrored export of generated physics link-role animations under legacy imported GOH `basis` objects with negative handedness.
+- Kept `SOURCE` recoil animation unchanged during mirror compensation, matching cannon/barrel recoil behavior that was already correct.
+- Limited the legacy visible-mirrored-basis compensation to generated GOH physics bake actions (`goh_recoil_*`, `goh_linked_recoil_*`, etc.) so ordinary hand-keyed Blender animations are not silently flipped just because an object has link-role metadata.
+- Smoothed `Antenna Whip` rebound timing by separating the fast source-recoil kick from its longer spring tail, low-pass filtering the tip target, and using a quintic end fade so late frames ease back to rest instead of snapping.
+- Preserved small late `Antenna Whip` over-zero rebounds through the long tail, preventing frames after the main cannon recoil from becoming a stiff one-way fade.
 
 ## 1.0.1 - 2026-04-26
 
