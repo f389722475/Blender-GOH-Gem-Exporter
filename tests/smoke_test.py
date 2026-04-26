@@ -16,6 +16,7 @@ from goh_core import (  # noqa: E402
     MeshAnimationState,
     AnimationState,
     BoneNode,
+    ExportError,
     ExportBundle,
     MaterialDef,
     MeshViewDef,
@@ -35,6 +36,7 @@ from goh_core import (  # noqa: E402
     read_volume,
     write_animation,
     write_export_bundle,
+    write_mesh,
 )
 
 
@@ -509,6 +511,28 @@ def main() -> None:
         assert parsed_large.mesh_frames[0]["basis"].vertex_count == large_vertex_count
         assert parsed_large.mesh_frames[0]["basis"].vertex_stride == large_stride
         assert parsed_large.mesh_frames[0]["basis"].vertex_data == large_blob
+
+        too_many_skin_bones = MeshData(
+            file_name="too_many_skin_bones.ply",
+            vertices=[
+                MeshVertex(position=(0.0, 0.0, 0.0), normal=(0.0, 0.0, 1.0), uv=(0.0, 0.0), bone_indices=(1, 0, 0, 0)),
+                MeshVertex(position=(1.0, 0.0, 0.0), normal=(0.0, 0.0, 1.0), uv=(1.0, 0.0), bone_indices=(1, 0, 0, 0)),
+                MeshVertex(position=(0.0, 1.0, 0.0), normal=(0.0, 0.0, 1.0), uv=(0.0, 1.0), bone_indices=(1, 0, 0, 0)),
+            ],
+            sections=[
+                MeshSection(
+                    material_file="body.mtl",
+                    triangle_indices=[(0, 1, 2)],
+                )
+            ],
+            skinned_bones=[f"bone_{index}" for index in range(256)],
+        )
+        try:
+            write_mesh(output_dir / "too_many_skin_bones.ply", too_many_skin_bones, bundle.materials)
+        except ExportError as exc:
+            assert "more than 255 skin bones" in str(exc)
+        else:
+            raise AssertionError("Meshes with more than 255 skin bones should be rejected before writing.")
         print("smoke test passed")
 
 
