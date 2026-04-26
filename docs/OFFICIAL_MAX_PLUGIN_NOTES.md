@@ -31,6 +31,7 @@ The Blender addon already covers these concepts exposed by the official exporter
 - `goh_force_commonmesh` is accepted as a Blender alias for `goh_force_mesh_animation`.
 - Mesh export now rejects skinned meshes with more than 255 skin bones before writing, matching the official exporter limit warning.
 - Blender-only linked physics helpers, including `Antenna Whip`, bake ordinary GOH animation data while preserving legacy-style timeline clip ranges.
+- GOH-native root `basis` mirror transforms can be deferred in Blender and restored at export time, matching SOEdit/game space while avoiding mirrored authoring transforms; ANM export also compensates rotation parity so pitch playback matches Blender.
 
 ## Still Intentionally Not Mirrored
 

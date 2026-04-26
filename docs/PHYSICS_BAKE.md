@@ -136,9 +136,9 @@ Suggested ranges:
 ## Link Roles
 
 - `Body Spring`
-  Heavy hull recoil with a hard initial shove followed by multiple damped pitch and side reversals, inspired by Sherman-style cannon recoil. Default tail: `1.65x`.
+Heavy hull recoil with a hard initial shove, nose-up hull swing, and multiple damped pitch and side reversals, inspired by Sherman-style cannon recoil. Default tail: `1.65x`.
 - `Antenna Whip`
-  Flexible tank-antenna whip that locks its response length to the source recoil frame count instead of using the long role tail. Mesh antennas are baked as anchored shape-key mesh animation when possible, so the lower root segment remains fixed while the free tip bends and springs back. Sparse antenna meshes can be auto-subdivided along their length by `Antenna Bend Segments`; set it to `0` if you need to keep the mesh topology unchanged. The bend direction prefers the linked source mesh principal axis, so elongated cannon/barrel sources drive front-back sway along the gun and vehicle body instead of a side-axis artifact. The bend shape is solved as a principal-axis constrained spine using a first-mode cantilever beam response, distance constraints, a light bending constraint, and tangent-rotated sections, so it forms one elastic arc like a real whip antenna instead of a snake-like S-curve or straight-line tip interpolation. The time response uses a soft-limited muzzle impulse with several damped left-right rebounds inside the recoil clip, and the shape keys use linear interpolation without writing long static tails. `Antenna Root Anchor` can be negative to place the virtual bend root below the visible mesh bottom while keeping the lowest vertices pinned. Default tail: `2.15x` for duration-scale reporting, but linked recoil bakes use the source recoil frames.
+Flexible tank-antenna whip with a fast source-driven kick and a longer smooth spring tail. Mesh antennas are baked as anchored shape-key mesh animation when possible, so the lower root segment remains fixed while the free tip bends and springs back. Sparse antenna meshes can be auto-subdivided along their length by `Antenna Bend Segments`; set it to `0` if you need to keep the mesh topology unchanged. The bend direction prefers the linked source mesh principal axis, so elongated cannon/barrel sources drive front-back sway along the gun and vehicle body instead of a side-axis artifact. The bend shape is solved as a principal-axis constrained spine using a minimum-bending-energy cubic beam profile, a first-mode cantilever blend, distance constraints, a light bending constraint, and tangent-rotated sections, so it forms one elastic arc like a real whip antenna instead of a snake-like S-curve or straight-line tip interpolation. The time response uses a soft-limited muzzle impulse on the source recoil timing, a low-pass filtered tip target, a separate low-amplitude late rebound mode, and a long quintic end fade so late frames keep small over-zero spring motion before easing back to rest. `Antenna Root Anchor` can be negative to place the virtual bend root below the visible mesh bottom while keeping the lowest vertices pinned. Default tail: `2.15x`.
 - `Accessory Jitter`
   Loose external equipment with fast rattle, asymmetric side shake, and noisy secondary vibration. Default tail: `0.70x`.
 - `Follower`
@@ -162,10 +162,14 @@ It borrows ideas from real-time physically based animation without running a hea
   The local/global projection idea is a good future path for more robust multi-part link networks. See Bouaziz et al., [Projective Dynamics](https://www.projectivedynamics.org/Projective_Dynamics/index.html).
 - `Reduced / modal dynamics`
   Low-dimensional modal responses match this addon's goal: convincing deformation and secondary motion without full FEM cost. See Barbič and James, [Real-Time Subspace Integration](https://graphics.cs.cmu.edu/projects/stvk/).
+- `Minimum bending-energy beam curve`
+  `Antenna Whip` uses a cubic free-tip beam profile, `0.5 * u^2 * (3 - u)`, blended with the first cantilever mode. This keeps the root clamped, lets the tip bend freely, and avoids high-order oscillation artifacts while still reading like a flexible tank antenna.
 
 ## Export Notes
 
 - The baked motion is exported through the active `Action` timeline and recorded clip ranges, with NLA still supported for manual advanced workflows.
+- Generated GOH physics actions under a legacy mirrored imported `basis` are mirror-corrected at ANM export time. The source recoil object is left unchanged, and ordinary hand-keyed actions are not flipped just because an object has link-role metadata.
+- For new GOH-native imports, keep `Defer Basis Flip` enabled so Blender, SOEdit, and game playback use the same visible animation direction while the exporter stores the required GOH basis orientation and ANM pitch parity.
 - Mesh ripple is exported through the existing mesh-animation path.
 - For GOH use, keep the motion short and readable.
 - If one animation must cover many fire directions, create separate directional clips such as `fire_front`, `fire_left`, `fire_right`, or bake each turret direction separately.
