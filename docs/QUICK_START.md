@@ -14,11 +14,12 @@
 
 ## 3. Animate
 
-- Prefer `NLA` strips for named clips
-- Fall back to the active `Action` if no `NLA` is available
+- Use one active `Action` timeline for physics-baked clips when you want 3ds Max-style frame ranges
+- Use `NLA` strips only for manual advanced clip layering
 - Use shape keys or mesh animation only when topology stays stable
 - Use `GOH Tools > Physics Bake Presets` for source-only recoil, linked recoil, directional fire clips, impact shake, or armor ripple
 - For linked recoil, assign source-to-driven part relationships first, then run `Bake Linked Recoil`
+- For `Antenna Whip`, link the antenna to the gun/barrel source so the bake can infer the source mesh principal axis and keep the antenna swaying front-back with the cannon
 - Use `Physics Power` to scale the whole physical effect after the role feels right
 - Use `Duration Scale` to stretch heavy follow-through or shorten snappy light-weapon motion
 - For armor ripple, place the 3D Cursor on the hit point and run `Create Armor Ripple` on the mesh

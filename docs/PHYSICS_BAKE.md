@@ -51,7 +51,19 @@ The addon stores:
 2. Enable `Use Stored Links` if linked objects are not currently selected.
 3. Run `Bake Linked Recoil`.
 
-The operator creates normal Blender actions on the source and linked objects.
+The operator writes ordinary keyframes into the active Blender action on the source and linked objects.
+Each bake also records a clip range on that action, so one part can keep multiple baked clips, such as `fire` on frames `1-48` and `hit_body` on frames `49-96`, without the later bake replacing the earlier one.
+This mirrors the 3ds Max workflow where dense timeline keys are sliced into GEM sequences by explicit frame ranges.
+
+The readable object custom property is:
+
+```text
+goh_sequence_ranges = fire:1-48; hit_body:49-96
+```
+
+It does not replace `goh_sequence_name`.
+Instead, it acts as a multi-sequence range table; `goh_sequence_name` remains the single-clip fallback when no range table exists.
+Use `sequence->file:1-48` if the visible GEM sequence name and output `.anm` file stem need to differ.
 
 ## Directional Recoil Set
 
@@ -64,7 +76,7 @@ Typical use:
 - keep `Clip Prefix` as `fire`
 - run `Bake Directional Set`
 
-The addon writes NLA clips such as `fire_front`, `fire_back`, `fire_left`, and `fire_right`.
+The addon writes timeline clip ranges such as `fire_front`, `fire_back`, `fire_left`, and `fire_right`.
 The six-axis mode also adds `up` and `down` clips for special cases.
 
 ## Impact Response
@@ -126,7 +138,7 @@ Suggested ranges:
 - `Body Spring`
   Heavy hull recoil with a hard initial shove followed by multiple damped pitch and side reversals, inspired by Sherman-style cannon recoil. Default tail: `1.65x`.
 - `Antenna Whip`
-  Delayed flexible whip using a higher-frequency oscillator and stronger rotation than translation. Default tail: `2.15x`.
+  Flexible tank-antenna whip that locks its response length to the source recoil frame count instead of using the long role tail. Mesh antennas are baked as anchored shape-key mesh animation when possible, so the lower root segment remains fixed while the free tip bends and springs back. Sparse antenna meshes can be auto-subdivided along their length by `Antenna Bend Segments`; set it to `0` if you need to keep the mesh topology unchanged. The bend direction prefers the linked source mesh principal axis, so elongated cannon/barrel sources drive front-back sway along the gun and vehicle body instead of a side-axis artifact. The bend shape is solved as a principal-axis constrained spine using a first-mode cantilever beam response, distance constraints, a light bending constraint, and tangent-rotated sections, so it forms one elastic arc like a real whip antenna instead of a snake-like S-curve or straight-line tip interpolation. The time response uses a soft-limited muzzle impulse with several damped left-right rebounds inside the recoil clip, and the shape keys use linear interpolation without writing long static tails. `Antenna Root Anchor` can be negative to place the virtual bend root below the visible mesh bottom while keeping the lowest vertices pinned. Default tail: `2.15x` for duration-scale reporting, but linked recoil bakes use the source recoil frames.
 - `Accessory Jitter`
   Loose external equipment with fast rattle, asymmetric side shake, and noisy secondary vibration. Default tail: `0.70x`.
 - `Follower`
@@ -153,9 +165,9 @@ It borrows ideas from real-time physically based animation without running a hea
 
 ## Export Notes
 
-- The baked motion is exported through the existing `Action / NLA` animation path.
+- The baked motion is exported through the active `Action` timeline and recorded clip ranges, with NLA still supported for manual advanced workflows.
 - Mesh ripple is exported through the existing mesh-animation path.
 - For GOH use, keep the motion short and readable.
 - If one animation must cover many fire directions, create separate directional clips such as `fire_front`, `fire_left`, `fire_right`, or bake each turret direction separately.
 - `Assign Physics Link` writes role defaults automatically when the UI fields are still at generic values, so a role behaves like a real preset immediately.
-- `Clear Physics Links` removes stored physics links, and can also detach generated GOH physics actions/NLA strips when `Clear Baked Actions` is enabled.
+- `Clear Physics Links` removes stored physics links, and can also detach generated GOH physics actions or clip-range metadata when `Clear Baked Actions` is enabled.

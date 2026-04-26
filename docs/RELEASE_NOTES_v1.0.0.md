@@ -21,8 +21,11 @@ This is the first stable release of the Blender GOH GEM Exporter package.
 ## Fixed Since The Last Prerelease
 
 - `Bake Linked Recoil` now preserves or inherits `goh_sequence_name` and `goh_sequence_file` from the recoil source/current source Action.
+- Physics bakes now append visible timeline keyframes and record explicit clip ranges, so later ranges such as `hit 49-96` do not replace earlier ranges such as `fire 1-48`.
 - Linked objects no longer let stale `recoil` Action metadata override a source sequence such as `fire`.
 - Object-mode `.anm` export no longer writes the static GOH `basis` bone into animation BMAP data.
+- Legacy `AnimationAuto` lines, `LODLastOff`, and old Max mesh-view flags are recognized for better compatibility with official 3ds Max exporter workflows.
+- Skinned meshes with more than 255 skin bones now fail early with a clear exporter error.
 
 ## Recommended Release Assets
 
