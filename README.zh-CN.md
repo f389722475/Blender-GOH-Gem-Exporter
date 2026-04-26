@@ -6,27 +6,29 @@
 
 它的目标不是简单复刻 3ds Max MultiScript，而是在 Blender 里提供更现代、更结构化的 GOH 模型、碰撞、材质、动画和物理烘焙工作流。
 
-当前稳定版本：`1.0.0`。
+当前稳定版本：`1.0.1`。
 
 ## 主要功能
 
 - 导出 `mdl`、`ply`、`mtl`、`vol`、`anm`
 - 导入完整 `.mdl` 模型用于查看和二次编辑
 - 导入 `.anm` 动画到已导入模型
+- `.mdl` 导入会恢复可视 mesh、Volume、Obstacle 和 Area 辅助对象
 - 支持普通模型、骨骼蒙皮模型、mesh animation 和 shape-key 网格动画
 - 支持 `Volume`、`Obstacle`、`Area` 等 GOH 辅助对象
 - 支持 `Box`、`Sphere`、`Cylinder` primitive volume，不必把优化用基本体碰撞强行转成网格
 - 支持 `Basis` 实体元数据、旧版 Max 文本属性、Blender 结构化 `goh_*` 自定义属性
 - 提供 GOH 预设、Basis 面板、Transform block、Weapon helper、Texture helper、材质自动识别和场景校验
+- 导出时生成 `GOH_Export_Manifest.json`，记录文件哈希、数量统计和导出设置
 - 支持 LOD 文件列表、包围盒碰撞辅助体、后坐力动作、方向射击动画、一键物理联结烘焙
 
 ## 推荐安装
 
 正式发布包里有两个 zip：
 
-- `blender_goh_gem_exporter-1.0.0.zip`
+- `blender_goh_gem_exporter-1.0.1.zip`
   Blender 插件安装包，推荐在 Blender 里直接安装这个文件。
-- `blender_goh_gem_exporter-1.0.0-full.zip`
+- `blender_goh_gem_exporter-1.0.1-full.zip`
   完整源码、文档、测试和示例素材快照，适合 GitHub 发布页或二次开发。
 
 安装步骤：
@@ -34,7 +36,7 @@
 1. 打开 Blender。
 2. 进入 `Edit > Preferences > Add-ons`。
 3. 点击 `Install...`。
-4. 选择 `blender_goh_gem_exporter-1.0.0.zip`。
+4. 选择 `blender_goh_gem_exporter-1.0.1.zip`。
 5. 启用 `GOH GEM Exporter`。
 
 ## Blender 面板
@@ -136,7 +138,7 @@ goh_sequence_file = fire
 - `goh_sequence_file`
   动画文件名，不写时通常等于 `goh_sequence_name`。
 - `goh_force_commonmesh`
-  普通模型也按 `CommonMesh` 逻辑处理，避免旧 Max 工作流里修改器动画的差异。
+  `goh_force_mesh_animation` 的兼容别名，适合习惯旧 Max `CommonMesh` 命名的工作流。
 - `goh_force_mesh_animation`
   强制按 mesh animation 导出 shape-key / 网格变形。
 
@@ -154,6 +156,7 @@ goh_sequence_file = fire
 - `SteerMax=...`
 - `Animation=...`
 - `AnimationResume=...`
+- `AnimationAuto=...`
 - `IKMin=...`
 - `IKMax=...`
 - `IKSpeed=...`

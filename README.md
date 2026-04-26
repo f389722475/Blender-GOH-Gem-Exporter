@@ -6,21 +6,24 @@
 
 It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds Max GOH workflows while keeping the authoring experience Blender-native.
 
-Current stable release: `1.0.0`.
+Current stable release: `1.0.1`.
 
 ## Highlights
 
 - Export `mdl`, `ply`, `mtl`, `vol`, and `anm`
 - Import `anm` back into Blender
+- Import whole `.mdl` models with visual meshes, volumes, obstacles, and areas
 - Export visible meshes, skinned meshes, and mesh animation
 - Export helper data for `Volume`, `Obstacle`, and `Area`
 - Write inline primitive collision for `Box`, `Sphere`, and `Cylinder`
 - Support `Basis` metadata, legacy Max text properties, and structured `goh_*` properties
 - Provide Blender-side GOH panels for presets, basis metadata, transform blocks, and helper tools
 - Validate scenes before export and generate `GOH_Validation_Report.txt`
+- Write `GOH_Export_Manifest.json` with file hashes and export counts
 - Auto-fill GOH material texture fields from Blender image texture names
 - Generate LOD file lists, bounds-based volume helpers, baked recoil actions, and directional fire clips
 - Bake linked recoil, impact shake, and armor ripple mesh-animation effects
+- `Antenna Whip` now bakes rooted antenna mesh deformation with source-axis front-back sway, smooth linear shape-key playback, and natural multi-bounce recoil follow-through
 
 ## Repository Layout
 
@@ -80,10 +83,15 @@ It checks common authoring mistakes:
 - missing Basis metadata
 - duplicate GOH export names
 - mesh objects without material slots
+- mesh objects with materials but no UV map
+- empty meshes and zero-area faces
 - unapplied mesh scale
 - invalid LOD file names
 - invalid `goh_volume_kind`
+- missing cylinder primitive axis metadata
 - missing volume bone targets
+- invalid `Obstacle` / `Area` shape helper metadata
+- overlapping multi-range `goh_sequence_ranges`
 - materials without GOH texture fields
 - missing image texture files
 
@@ -105,9 +113,9 @@ It reports warnings for issues that may still export but should be inspected bef
 - `Assign Physics Link`
   stores a source-to-driven-part relationship for linked physics baking
 - `Bake Linked Recoil`
-  bakes a recoil source plus role-specific hull pendulum spring, antenna whip, accessory jitter, follower, suspension bounce, or track rumble response into regular object keyframes
+  bakes a recoil source plus role-specific hull pendulum spring, anchored antenna whip mesh deformation with source-axis front-back sway, accessory jitter, follower, suspension bounce, or track rumble response into regular animation data
 - `Bake Directional Set`
-  creates NLA clips such as `fire_front`, `fire_back`, `fire_left`, and `fire_right`
+  records timeline clip ranges such as `fire_front`, `fire_back`, `fire_left`, and `fire_right`
 - `Bake Impact Response`
   creates a damped hit/shake action for selected parts
 - `Create Armor Ripple`
@@ -117,7 +125,7 @@ It reports warnings for issues that may still export but should be inspected bef
 - `Duration Scale`
   stretches or compresses role-specific linked physics tails without changing their relative preset behavior
 - `Clear Physics Links`
-  removes stored physics links and can detach generated GOH physics actions/NLA strips
+  removes stored physics links and can detach generated GOH physics actions or clip-range metadata
 
 ## Physics Bake Workflow
 
@@ -134,6 +142,7 @@ Common use:
 6. Activate the source object and run `Bake Linked Recoil`.
 
 If the recoil source or its current Action has `goh_sequence_name = fire` and `goh_sequence_file = fire`, linked physics bakes inherit that sequence and export as `fire.anm` instead of the default `recoil.anm`.
+When one object contains several baked ranges, `goh_sequence_ranges = fire:1-48; hit:49-96` acts as a multi-sequence table and takes priority over the single `goh_sequence_name` fallback.
 
 Use `Physics Power` around `1.4-2.2` when you need heavier cannon recoil or more visible movement.
 Use `Duration Scale` below `1.0` for snappy small-caliber motion, or above `1.0` for heavy hull recovery and antenna follow-through.
@@ -174,6 +183,7 @@ Supported legacy patterns include:
 - `SteerMax=...`
 - `Animation=...`
 - `AnimationResume=...`
+- `AnimationAuto=...`
 - `IKMin=...`
 - `IKMax=...`
 - `IKSpeed=...`
@@ -197,7 +207,7 @@ Compatibility rules:
 3. Select the zip file.
 4. Enable `GOH GEM Exporter`
 
-The official release asset is `blender_goh_gem_exporter-1.0.0.zip`.
+The official release asset is `blender_goh_gem_exporter-1.0.1.zip`.
 For a cleaner release-ready package, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Recommended Round-Trip Export Settings
@@ -233,6 +243,8 @@ python -X utf8 tests\smoke_test.py
 - [中文说明](README.zh-CN.md)
 - [Quick Start](docs/QUICK_START.md)
 - [Physics Bake Workflow](docs/PHYSICS_BAKE.md)
+- [Official Max Plugin Compatibility Notes](docs/OFFICIAL_MAX_PLUGIN_NOTES.md)
+- [v1.0.1 Release Notes](docs/RELEASE_NOTES_v1.0.1.md)
 - [v1.0.0 Release Notes](docs/RELEASE_NOTES_v1.0.0.md)
 
 ## License

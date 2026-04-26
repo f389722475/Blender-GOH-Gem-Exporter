@@ -2,17 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- No changes yet.
+
+## 1.0.1 - 2026-04-26
+
+### Fixed
+
+- `Antenna Whip` linked physics now bakes mesh antennas as anchored shape-key mesh animation when possible, auto-adds lengthwise bend segments for sparse antenna meshes, detects the antenna principal axis, and uses a Verlet/PBD-style constrained spine with tangent-rotated sections so the bend travels along the antenna instead of behaving like a straight rod.
+- Re-baking `Antenna Whip` now clears generated antenna shape keys before topology subdivision, so changed `Antenna Root Anchor` and `Antenna Bend Segments` values actually take effect on repeated bakes.
+- `Antenna Root Anchor` now supports negative virtual-root values for moving the bend start below the visible mesh bottom while keeping the bottom vertices pinned.
+- `Antenna Whip` linked recoil now follows the source recoil frame count, so a 30-frame cannon recoil drives the antenna bend and rebound inside that same response window instead of delaying most motion into the old long tail.
+- Tuned `Antenna Whip` to use a first-mode cantilever beam response with constrained spine sampling, which removes the snake-like S-curve while keeping a visible rooted whip arc and early cannon-shot impulse.
+- Increased `Antenna Whip` muzzle impulse and lowered modal damping so the antenna now performs multiple natural left-right rebounds within the recoil clip.
+- Smoothed `Antenna Whip` playback by replacing hard tip clamps with soft limiting, using linear shape-key interpolation, and trimming static shape-key tails after the antenna response ends.
+- `Antenna Whip` now infers the linked source mesh principal axis for elongated gun/barrel sources, keeping antenna sway aligned with the cannon and vehicle front-back direction instead of accidentally swinging sideways from a mismatched recoil axis.
+
 ## 1.0.0 - 2026-04-25
 
 ### Added
 
 - Added the first stable release package layout with addon-only and full-source release assets.
 - Added a Chinese README and stable v1.0.0 release notes for bilingual GitHub presentation.
+- Added `.mdl` import visualization for `Obstacle` and `Area` helpers, including `Obb2`, `Circle2`, and `Polygon2` shapes.
+- Added `GOH_Export_Manifest.json` with exported file hashes, export settings, and object/animation counts.
 
 ### Fixed
 
+- Physics bake now appends clip ranges on the active Action timeline instead of replacing the previous bake, matching the 3ds Max workflow where one dense timeline is sliced by frame ranges such as `fire 1-48` and `hit 49-96`.
 - `Bake Linked Recoil` now preserves or inherits custom `goh_sequence_name` / `goh_sequence_file` values such as `fire`, instead of falling back to `recoil.anm`.
 - Linked physics objects ignore stale old linked Action names during a new source-driven bake, so previous `recoil` metadata cannot override the current source sequence.
+- Imported primitive cylinder volumes now restore `goh_volume_axis=z` for safer round-trip export.
+- Scene validation now warns about missing UV maps, empty / zero-area meshes, invalid shape helpers, missing cylinder axes, and overlapping multi-range GOH sequence metadata.
 
 ## 0.14.0-pre6 - 2026-04-25
 
