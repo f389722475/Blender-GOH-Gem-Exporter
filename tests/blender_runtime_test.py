@@ -340,9 +340,13 @@ def main() -> None:
         if clip_frames <= tool_settings.recoil_frames:
             raise RuntimeError("Physics duration scale did not extend linked recoil clip length.")
         antenna_clip_frames = exporter_module._physics_object_clip_frames(recoil_antenna, tool_settings, tool_settings.recoil_frames)
-        antenna_expected_frames = tool_settings.recoil_frames + int(recoil_antenna.get("goh_physics_delay", 0))
-        if antenna_clip_frames != antenna_expected_frames:
-            raise RuntimeError("Antenna Whip response should follow the source recoil frame count instead of the long role tail.")
+        antenna_expected_frames = exporter_module._physics_link_response_frames(
+            tool_settings,
+            "ANTENNA_WHIP",
+            tool_settings.recoil_frames,
+        ) + int(recoil_antenna.get("goh_physics_delay", 0))
+        if antenna_clip_frames != antenna_expected_frames or antenna_clip_frames <= tool_settings.recoil_frames:
+            raise RuntimeError("Antenna Whip response should use its long smooth spring tail.")
         stale_link_action = bpy.data.actions.new("stale_recoil_body")
         stale_link_action["goh_sequence_name"] = "recoil"
         stale_link_action["goh_sequence_file"] = "recoil"
@@ -450,8 +454,8 @@ def main() -> None:
             raise RuntimeError("Antenna Whip mesh bake did not name per-frame keys with frame numbers.")
         first_antenna_frame = min(frame_to_antenna_key)
         last_antenna_frame = max(frame_to_antenna_key)
-        if last_antenna_frame > first_antenna_frame + antenna_expected_frames:
-            raise RuntimeError("Antenna Whip mesh bake wrote a long static shape-key tail after the recoil response.")
+        if last_antenna_frame < first_antenna_frame + max(1, int(round(antenna_expected_frames * 0.85))):
+            raise RuntimeError("Antenna Whip mesh bake did not preserve enough smooth spring tail frames.")
         early_cutoff_frame = first_antenna_frame + max(3, int(round(tool_settings.recoil_frames * 0.65)))
         early_tip_motion = 0.0
         for frame, key in frame_to_antenna_key.items():
@@ -489,12 +493,18 @@ def main() -> None:
         free_length = max_anchor - anchor_limit
         tip_direction = tip_delta.normalized()
         tip_sway_samples = []
+        tip_sway_by_frame = []
         for key in antenna_keys:
             sample_delta = Vector((0.0, 0.0, 0.0))
             for index in tip_indices:
                 sample_delta += key.data[index].co - base_positions[index]
             sample_delta /= float(max(1, len(tip_indices)))
-            tip_sway_samples.append(sample_delta.dot(tip_direction))
+            tip_sway = sample_delta.dot(tip_direction)
+            tip_sway_samples.append(tip_sway)
+            try:
+                tip_sway_by_frame.append((int(key.name.rsplit("_", 1)[-1]), tip_sway))
+            except ValueError:
+                pass
         significant_sway = [value for value in tip_sway_samples if abs(value) >= max_tip_motion * 0.05]
         sign_changes = 0
         previous_sign = 0
@@ -505,6 +515,24 @@ def main() -> None:
             previous_sign = sign
         if sign_changes < 1 or not any(value < -max_tip_motion * 0.08 for value in tip_sway_samples):
             raise RuntimeError("Antenna Whip mesh bake did not create a visible left-right rebound after the first bend.")
+        late_start_frame = first_antenna_frame + max(
+            int(round(tool_settings.recoil_frames * 1.20)),
+            int(round((last_antenna_frame - first_antenna_frame) * 0.50)),
+        )
+        late_significant_sway = [
+            value
+            for frame, value in sorted(tip_sway_by_frame)
+            if frame >= late_start_frame and abs(value) >= max_tip_motion * 0.018
+        ]
+        late_sign_changes = 0
+        previous_sign = 0
+        for value in late_significant_sway:
+            sign = 1 if value > 0.0 else -1
+            if previous_sign and sign != previous_sign:
+                late_sign_changes += 1
+            previous_sign = sign
+        if late_sign_changes < 1:
+            raise RuntimeError("Antenna Whip late spring tail became a stiff fade instead of continuing to rebound.")
         opposite_bend_levels = 0
         checked_bend_levels = 0
         for level in axis_levels:
@@ -718,6 +746,9 @@ def main() -> None:
             raise RuntimeError("Body Spring should produce multiple damped rotation reversals.")
         if sign_changes(body_side, 0.008) < 1:
             raise RuntimeError("Body Spring should include lateral pendulum follow-through.")
+        dominant_early_body_rotation = max(body_rotation[:18], key=lambda value: abs(value))
+        if dominant_early_body_rotation >= 0.0:
+            raise RuntimeError("Body Spring should start with a nose-up hull swing.")
         early_rotation = max(abs(value) for value in body_rotation[:18])
         late_rotation = max(abs(value) for value in body_rotation[30:])
         if late_rotation >= early_rotation:
@@ -1013,8 +1044,17 @@ def main() -> None:
         if not imported_objects:
             raise RuntimeError("Model import did not create tagged imported objects.")
         imported_body = next((obj for obj in imported_objects if obj.get("goh_bone_name") == "body" and obj.type == "MESH"), None)
+        imported_basis = next((obj for obj in imported_objects if obj.get("goh_bone_name") == "basis" and obj.type == "EMPTY"), None)
         if imported_body is None or len(imported_body.data.vertices) == 0:
             raise RuntimeError("Model import did not rebuild the body visual mesh.")
+        if imported_basis is None or not imported_basis.get("goh_deferred_basis_flip"):
+            raise RuntimeError("Model import did not defer the mirrored GOH basis for Blender editing.")
+        if imported_basis.matrix_world.to_3x3().determinant() < 0.0:
+            raise RuntimeError("Deferred GOH basis import still displays a mirrored basis in Blender.")
+        rest_values = imported_basis.get("goh_rest_matrix_local")
+        rest_matrix = Matrix((rest_values[0:4], rest_values[4:8], rest_values[8:12], rest_values[12:16]))
+        if rest_matrix.to_3x3().determinant() >= 0.0:
+            raise RuntimeError("Deferred GOH basis import did not keep the mirrored basis for export.")
         if not imported_body.material_slots or imported_body.material_slots[0].material is None:
             raise RuntimeError("Model import did not attach a material to the body mesh.")
         imported_volumes = [obj for obj in imported_objects if obj.get("goh_is_volume")]
@@ -1094,10 +1134,11 @@ def main() -> None:
         basis_probe_mesh = bpy.data.meshes.new("basis_probe_mesh")
         basis_probe_mesh.from_pydata([(0.0, 0.0, 0.0), (0.25, 0.0, 0.0), (0.0, 0.25, 0.0)], [], [(0, 1, 2)])
         basis_probe_mesh.update()
-        basis_probe_basis = bpy.data.objects.new("basis", None)
-        basis_probe_basis.empty_display_type = "PLAIN_AXES"
-        scene.collection.objects.link(basis_probe_basis)
-        basis_probe_basis.matrix_world = Matrix(
+
+        def matrix_prop(matrix: Matrix) -> list[float]:
+            return [float(matrix[row][col]) for row in range(4) for col in range(4)]
+
+        goh_basis_matrix = Matrix(
             (
                 (1.0, 0.0, 0.0, 0.0),
                 (0.0, -1.0, 0.0, 0.0),
@@ -1105,6 +1146,10 @@ def main() -> None:
                 (0.0, 0.0, 0.0, 1.0),
             )
         )
+        basis_probe_basis = bpy.data.objects.new("basis", None)
+        basis_probe_basis.empty_display_type = "PLAIN_AXES"
+        scene.collection.objects.link(basis_probe_basis)
+        basis_probe_basis.matrix_world = goh_basis_matrix
         basis_probe_child = bpy.data.objects.new("BasisProbeBody", basis_probe_mesh)
         scene.collection.objects.link(basis_probe_child)
         basis_probe_child.parent = basis_probe_basis
@@ -1129,6 +1174,153 @@ def main() -> None:
         basis_probe_text = basis_probe_file.read_text(encoding="utf-8")
         if "{Position 20\t40\t60}" not in basis_probe_text:
             raise RuntimeError("Basis helper round-trip export baked the GOH basis orientation into the child bone.")
+        basis_probe_basis["goh_rest_matrix_local"] = matrix_prop(goh_basis_matrix)
+        basis_probe_basis["goh_deferred_basis_flip"] = True
+        basis_probe_basis.matrix_world = Matrix.Identity(4)
+        basis_probe_child.matrix_local = Matrix.Translation((1.0, 2.0, 3.0))
+        bpy.ops.object.select_all(action="DESELECT")
+        basis_probe_basis.select_set(True)
+        basis_probe_child.select_set(True)
+        bpy.context.view_layer.objects.active = basis_probe_child
+        deferred_basis_probe_file = basis_probe_dir / "basis_probe_deferred.mdl"
+        deferred_basis_probe_result = bpy.ops.export_scene.goh_model(
+            filepath=str(deferred_basis_probe_file),
+            selection_only=True,
+            include_hidden=True,
+            axis_mode="NONE",
+            scale_factor=20.0,
+            export_animations=False,
+        )
+        if "FINISHED" not in deferred_basis_probe_result:
+            raise RuntimeError(f"Deferred basis helper round-trip export failed: {deferred_basis_probe_result}")
+        deferred_basis_probe_text = deferred_basis_probe_file.read_text(encoding="utf-8")
+        if "{Position 20\t40\t60}" not in deferred_basis_probe_text:
+            raise RuntimeError("Deferred basis export did not move the GOH basis flip back into the exported MDL.")
+        deferred_animation_dir = basis_probe_dir / "deferred_animation"
+        deferred_animation_dir.mkdir(parents=True, exist_ok=True)
+        basis_probe_child["goh_rest_matrix_local"] = matrix_prop(Matrix.Translation((1.0, 2.0, 3.0)))
+        scene.frame_set(1)
+        basis_probe_child.location = Vector((1.0, 2.0, 3.0))
+        basis_probe_child.rotation_euler = (0.0, 0.0, 0.0)
+        basis_probe_child.keyframe_insert(data_path="location", frame=1)
+        basis_probe_child.keyframe_insert(data_path="rotation_euler", frame=1)
+        scene.frame_set(2)
+        basis_probe_child.location = Vector((1.0, 1.5, 3.0))
+        basis_probe_child.rotation_euler = (0.0, 0.2, 0.0)
+        basis_probe_child.keyframe_insert(data_path="location", frame=2)
+        basis_probe_child.keyframe_insert(data_path="rotation_euler", frame=2)
+        if basis_probe_child.animation_data and basis_probe_child.animation_data.action:
+            basis_probe_child.animation_data.action.name = "manual_deferred_basis_probe"
+        bpy.ops.object.select_all(action="DESELECT")
+        basis_probe_basis.select_set(True)
+        basis_probe_child.select_set(True)
+        bpy.context.view_layer.objects.active = basis_probe_child
+        deferred_animation_result = bpy.ops.export_scene.goh_model(
+            filepath=str(deferred_animation_dir / "deferred_animation_probe.mdl"),
+            selection_only=True,
+            include_hidden=True,
+            axis_mode="NONE",
+            scale_factor=20.0,
+            export_animations=True,
+        )
+        if "FINISHED" not in deferred_animation_result:
+            raise RuntimeError(f"Deferred basis animation export failed: {deferred_animation_result}")
+        deferred_delta_y = None
+        deferred_pitch_marker = None
+        for animation_path in deferred_animation_dir.glob("*.anm"):
+            candidate = read_animation(animation_path)
+            if "body" not in candidate.bone_names or len(candidate.frames) < 2:
+                continue
+            delta = candidate.frames[-1]["body"].matrix[3][1] - candidate.frames[0]["body"].matrix[3][1]
+            if abs(delta) > 1.0:
+                deferred_delta_y = delta
+                deferred_pitch_marker = candidate.frames[-1]["body"].matrix[0][2]
+                break
+        if deferred_delta_y is None:
+            raise RuntimeError("Deferred basis animation export did not write the probe motion.")
+        if deferred_delta_y <= 0.0:
+            raise RuntimeError("Deferred basis animation was not converted into GOH export space.")
+        if deferred_pitch_marker is None or deferred_pitch_marker >= -0.05:
+            raise RuntimeError("Deferred basis animation did not invert the exported pitch delta for GOH playback.")
+        basis_probe_child.animation_data_clear()
+        if "goh_deferred_basis_flip" in basis_probe_basis:
+            del basis_probe_basis["goh_deferred_basis_flip"]
+        basis_probe_basis.matrix_world = goh_basis_matrix
+        basis_probe_child.matrix_local = Matrix.Translation((1.0, 2.0, 3.0))
+        mirror_probe_dir = basis_probe_dir / "mirrored_physics"
+        mirror_probe_dir.mkdir(parents=True, exist_ok=True)
+        mirror_probe_mesh = bpy.data.meshes.new("mirror_physics_probe_mesh")
+        mirror_probe_mesh.from_pydata([(0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (0.0, 0.2, 0.0)], [], [(0, 1, 2)])
+        mirror_probe_mesh.update()
+
+        mirror_source = bpy.data.objects.new("MirrorPhysicsSource", mirror_probe_mesh)
+        mirror_link = bpy.data.objects.new("MirrorPhysicsLink", mirror_probe_mesh)
+        scene.collection.objects.link(mirror_source)
+        scene.collection.objects.link(mirror_link)
+        for obj, bone_name, role, rest_location in (
+            (mirror_source, "mirror_source", "SOURCE", Vector((0.0, 0.0, 0.0))),
+            (mirror_link, "mirror_link", "BODY_SPRING", Vector((1.0, 0.25, 0.0))),
+        ):
+            obj.parent = basis_probe_basis
+            obj.matrix_parent_inverse = Matrix.Identity(4)
+            obj.location = rest_location
+            obj["goh_bone_name"] = bone_name
+            obj["goh_physics_role"] = role
+            obj["goh_rest_matrix_local"] = matrix_prop(Matrix.Translation(rest_location))
+            scene.frame_set(1)
+            obj.keyframe_insert(data_path="location", frame=1)
+            obj.location = rest_location + Vector((0.0, 0.5, 0.0))
+            obj.keyframe_insert(data_path="location", frame=2)
+            obj.location = rest_location
+            if obj.animation_data and obj.animation_data.action:
+                if role == "SOURCE":
+                    obj.animation_data.action.name = "goh_recoil_source_mirror_probe"
+                else:
+                    obj.animation_data.action.name = "goh_linked_recoil_mirror_probe"
+        bpy.ops.object.select_all(action="DESELECT")
+        basis_probe_basis.select_set(True)
+        mirror_source.select_set(True)
+        mirror_link.select_set(True)
+        bpy.context.view_layer.objects.active = mirror_link
+        mirror_probe_result = bpy.ops.export_scene.goh_model(
+            filepath=str(mirror_probe_dir / "mirror_physics_probe.mdl"),
+            selection_only=True,
+            include_hidden=True,
+            axis_mode="NONE",
+            scale_factor=20.0,
+            export_animations=True,
+        )
+        if "FINISHED" not in mirror_probe_result:
+            raise RuntimeError(f"Mirrored physics export probe failed: {mirror_probe_result}")
+        mirror_animation = None
+        source_delta_y = 0.0
+        link_delta_y = 0.0
+        for animation_path in mirror_probe_dir.glob("*.anm"):
+            candidate = read_animation(animation_path)
+            if "mirror_source" in candidate.bone_names and "mirror_link" in candidate.bone_names:
+                candidate_source_delta_y = (
+                    candidate.frames[-1]["mirror_source"].matrix[3][1]
+                    - candidate.frames[0]["mirror_source"].matrix[3][1]
+                )
+                candidate_link_delta_y = (
+                    candidate.frames[-1]["mirror_link"].matrix[3][1]
+                    - candidate.frames[0]["mirror_link"].matrix[3][1]
+                )
+                if abs(candidate_source_delta_y) > 1.0 and abs(candidate_link_delta_y) > 1.0:
+                    mirror_animation = candidate
+                    source_delta_y = candidate_source_delta_y
+                    link_delta_y = candidate_link_delta_y
+                    break
+        if mirror_animation is None:
+            raise RuntimeError("Mirrored physics export probe did not write the source/link animation.")
+        if source_delta_y <= 0.0:
+            raise RuntimeError("Mirrored physics export changed the source recoil direction unexpectedly.")
+        if link_delta_y >= 0.0 or abs(abs(link_delta_y) - abs(source_delta_y)) > 0.05:
+            raise RuntimeError("Mirrored physics link role animation was not reflected at export time.")
+        bpy.data.objects.remove(mirror_source, do_unlink=True)
+        bpy.data.objects.remove(mirror_link, do_unlink=True)
+        if mirror_probe_mesh.users == 0:
+            bpy.data.meshes.remove(mirror_probe_mesh)
         bpy.data.objects.remove(basis_probe_child, do_unlink=True)
         bpy.data.objects.remove(basis_probe_basis, do_unlink=True)
         if basis_probe_mesh.users == 0:
