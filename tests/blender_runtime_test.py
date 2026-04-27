@@ -19,6 +19,28 @@ from blender_goh_gem_exporter import blender_exporter as exporter_module  # noqa
 from blender_goh_gem_exporter.goh_core import read_animation  # noqa: E402
 
 
+def assert_auto_quad_cage(
+    obj: bpy.types.Object,
+    *,
+    max_faces: int | None = None,
+    exact_faces: int | None = None,
+    allowed_face_sides: set[int] | None = None,
+) -> None:
+    if not obj.get("goh_auto_quad_cage"):
+        raise RuntimeError(f"{obj.name} is not marked as an auto collision cage helper.")
+    face_count = len(obj.data.polygons)
+    if exact_faces is not None and face_count != exact_faces:
+        raise RuntimeError(f"{obj.name} has {face_count} faces, expected {exact_faces}.")
+    if max_faces is not None and face_count > max_faces:
+        raise RuntimeError(f"{obj.name} exceeded the configured face budget.")
+    allowed_face_sides = allowed_face_sides or {3, 4}
+    if any(len(polygon.vertices) not in allowed_face_sides for polygon in obj.data.polygons):
+        raise RuntimeError(f"{obj.name} contains a face outside the allowed topology: {sorted(allowed_face_sides)}.")
+    validation = str(obj.get("goh_auto_quad_validation") or "")
+    if "ERROR:" in validation:
+        raise RuntimeError(f"{obj.name} stored a failed collision cage validation report: {validation}")
+
+
 def main() -> None:
     addon.register()
     try:
@@ -156,6 +178,167 @@ def main() -> None:
         if bounds_helper is None or bounds_helper.get("goh_volume_kind") != "box" or bounds_helper.get("goh_volume_bone") != "body":
             raise RuntimeError("Volume From Bounds did not create the expected GOH helper.")
         bpy.data.objects.remove(bounds_helper, do_unlink=True)
+
+        bpy.ops.object.select_all(action="DESELECT")
+        cube.select_set(True)
+        bpy.context.view_layer.objects.active = cube
+        tool_settings.auto_convex_target_faces = 100
+        tool_settings.auto_convex_output_topology = "MIXED"
+        tool_settings.auto_convex_optimize_iterations = 1
+        tool_settings.auto_convex_margin = 0.0
+        auto_convex_result = bpy.ops.object.goh_create_auto_convex_volume()
+        if "FINISHED" not in auto_convex_result:
+            raise RuntimeError(f"Auto Convex Volume failed: {auto_convex_result}")
+        auto_convex_helper = bpy.context.active_object
+        if (
+            auto_convex_helper is None
+            or auto_convex_helper.get("goh_volume_kind") != "polyhedron"
+            or auto_convex_helper.get("goh_volume_bone") != "body"
+        ):
+            raise RuntimeError("Auto Convex Volume did not create the expected GOH helper.")
+        assert_auto_quad_cage(auto_convex_helper, max_faces=tool_settings.auto_convex_target_faces, exact_faces=96)
+        if auto_convex_helper.get("goh_auto_convex_max_outside", 1.0) > 1e-4:
+            raise RuntimeError("Auto Convex Volume did not enclose the source mesh.")
+        bpy.data.objects.remove(auto_convex_helper, do_unlink=True)
+
+        bpy.ops.object.select_all(action="DESELECT")
+        cube.select_set(True)
+        bpy.context.view_layer.objects.active = cube
+        tool_settings.auto_convex_target_faces = 512
+        tool_settings.auto_convex_output_topology = "TRIANGULATED"
+        tool_settings.auto_convex_optimize_iterations = 2
+        tool_settings.auto_convex_margin = 0.0
+        tri_convex_result = bpy.ops.object.goh_create_auto_convex_volume()
+        if "FINISHED" not in tri_convex_result:
+            raise RuntimeError(f"Auto Convex Volume triangulated probe failed: {tri_convex_result}")
+        tri_convex_helper = bpy.context.active_object
+        if tri_convex_helper is None or tri_convex_helper.get("goh_auto_convex_output_topology") != "TRIANGULATED":
+            raise RuntimeError("Auto Convex Volume did not preserve triangulated topology metadata.")
+        assert_auto_quad_cage(
+            tri_convex_helper,
+            max_faces=tool_settings.auto_convex_target_faces,
+            allowed_face_sides={3},
+        )
+        bpy.data.objects.remove(tri_convex_helper, do_unlink=True)
+
+        bpy.ops.mesh.primitive_uv_sphere_add(segments=32, ring_count=16, radius=1.0, location=(-3.0, 0.0, 0.0))
+        convex_probe = bpy.context.active_object
+        convex_probe.name = "ConvexProbe"
+        convex_probe["goh_bone_name"] = "convex_probe"
+        bpy.ops.object.select_all(action="DESELECT")
+        convex_probe.select_set(True)
+        bpy.context.view_layer.objects.active = convex_probe
+        tool_settings.auto_convex_template = "SPHERE"
+        tool_settings.auto_convex_fit_mode = "RAY"
+        tool_settings.auto_convex_output_topology = "MIXED"
+        tool_settings.auto_convex_optimize_iterations = 1
+        tool_settings.auto_convex_target_faces = 96
+        tool_settings.auto_convex_max_hulls = 1
+        tool_settings.auto_convex_margin = 0.002
+        sphere_convex_result = bpy.ops.object.goh_create_auto_convex_volume()
+        if "FINISHED" not in sphere_convex_result:
+            raise RuntimeError(f"Auto Convex Volume sphere probe failed: {sphere_convex_result}")
+        sphere_convex_helpers = [
+            obj for obj in bpy.context.selected_objects
+            if obj.get("goh_auto_convex_source") == "ConvexProbe"
+        ]
+        if len(sphere_convex_helpers) != 1:
+            raise RuntimeError("Auto Convex Volume sphere probe did not create one quad cage.")
+        for sphere_convex_helper in sphere_convex_helpers:
+            assert_auto_quad_cage(sphere_convex_helper, exact_faces=96)
+            if "quad_sphere" not in str(sphere_convex_helper.get("goh_auto_convex_mode") or ""):
+                raise RuntimeError("Auto Convex Volume sphere probe did not use the quad-sphere path.")
+            if sphere_convex_helper.get("goh_auto_convex_max_outside", 1.0) > 1e-4:
+                raise RuntimeError("Auto Convex Volume sphere probe did not enclose the source mesh.")
+            bpy.data.objects.remove(sphere_convex_helper, do_unlink=True)
+        bpy.data.objects.remove(convex_probe, do_unlink=True)
+
+        hull_mesh = bpy.data.meshes.new("LoftHullProbeMesh")
+        hull_vertices = [
+            (-2.0, -0.8, -0.25),
+            (-2.0, 0.8, -0.25),
+            (-2.0, 0.55, 0.45),
+            (-2.0, -0.55, 0.45),
+            (2.0, -1.15, -0.35),
+            (2.0, 1.15, -0.35),
+            (2.0, 0.72, 0.35),
+            (2.0, -0.72, 0.35),
+        ]
+        hull_faces = [
+            (0, 1, 2, 3),
+            (4, 7, 6, 5),
+            (0, 4, 5, 1),
+            (1, 5, 6, 2),
+            (2, 6, 7, 3),
+            (3, 7, 4, 0),
+        ]
+        hull_mesh.from_pydata(hull_vertices, [], hull_faces)
+        hull_mesh.update(calc_edges=True)
+        hull_probe = bpy.data.objects.new("LoftHullProbe", hull_mesh)
+        bpy.context.collection.objects.link(hull_probe)
+        hull_probe["goh_bone_name"] = "body"
+        bpy.ops.object.select_all(action="DESELECT")
+        hull_probe.select_set(True)
+        bpy.context.view_layer.objects.active = hull_probe
+        tool_settings.auto_convex_template = "AUTO"
+        tool_settings.auto_convex_fit_mode = "OBB"
+        tool_settings.auto_convex_output_topology = "MIXED"
+        tool_settings.auto_convex_optimize_iterations = 1
+        tool_settings.auto_convex_target_faces = 96
+        tool_settings.auto_convex_max_hulls = 1
+        tool_settings.auto_convex_margin = 0.002
+        loft_result = bpy.ops.object.goh_create_auto_convex_volume()
+        if "FINISHED" not in loft_result:
+            raise RuntimeError(f"Auto Quad Cage Volume loft probe failed: {loft_result}")
+        loft_helper = bpy.context.active_object
+        if loft_helper is None or loft_helper.get("goh_auto_convex_source") != "LoftHullProbe":
+            raise RuntimeError("Auto Quad Cage Volume loft probe did not create the expected helper.")
+        assert_auto_quad_cage(loft_helper, exact_faces=96)
+        if "quad_loft" not in str(loft_helper.get("goh_auto_convex_mode") or ""):
+            raise RuntimeError("Auto Quad Cage Volume loft probe did not use the loft path.")
+        bpy.data.objects.remove(loft_helper, do_unlink=True)
+        bpy.data.objects.remove(hull_probe, do_unlink=True)
+
+        bpy.ops.mesh.primitive_cube_add(size=0.5, location=(-5.0, -1.0, 0.0))
+        loose_a = bpy.context.active_object
+        bpy.ops.mesh.primitive_cube_add(size=0.5, location=(-5.0, 1.0, 0.0))
+        loose_b = bpy.context.active_object
+        bpy.ops.object.select_all(action="DESELECT")
+        loose_a.select_set(True)
+        loose_b.select_set(True)
+        bpy.context.view_layer.objects.active = loose_a
+        bpy.ops.object.join()
+        loose_source = bpy.context.active_object
+        loose_source.name = "LooseConvexProbe"
+        loose_source["goh_bone_name"] = "loose_probe"
+        bpy.ops.object.select_all(action="DESELECT")
+        loose_source.select_set(True)
+        bpy.context.view_layer.objects.active = loose_source
+        tool_settings.auto_convex_template = "ROUNDED_BOX"
+        tool_settings.auto_convex_fit_mode = "OBB"
+        tool_settings.auto_convex_output_topology = "MIXED"
+        tool_settings.auto_convex_optimize_iterations = 1
+        tool_settings.auto_convex_target_faces = 200
+        tool_settings.auto_convex_max_hulls = 8
+        tool_settings.auto_convex_split_loose_parts = True
+        tool_settings.auto_convex_min_part_vertices = 4
+        loose_convex_result = bpy.ops.object.goh_create_auto_convex_volume()
+        if "FINISHED" not in loose_convex_result:
+            raise RuntimeError(f"Auto Convex Volume loose-part probe failed: {loose_convex_result}")
+        loose_helpers = [
+            obj for obj in bpy.context.selected_objects
+            if obj.get("goh_auto_convex_source") == "LooseConvexProbe"
+        ]
+        if len(loose_helpers) != 2:
+            raise RuntimeError("Auto Convex Volume loose-part probe did not create one hull per loose island.")
+        loose_names = {helper.get("goh_volume_name") for helper in loose_helpers}
+        if len(loose_names) != 2:
+            raise RuntimeError("Auto Convex Volume loose-part probe did not create unique volume names.")
+        for loose_helper in loose_helpers:
+            assert_auto_quad_cage(loose_helper, max_faces=tool_settings.auto_convex_target_faces, exact_faces=150)
+            bpy.data.objects.remove(loose_helper, do_unlink=True)
+        bpy.data.objects.remove(loose_source, do_unlink=True)
+
         bpy.ops.object.select_all(action="DESELECT")
         cube.select_set(True)
         bpy.context.view_layer.objects.active = cube
