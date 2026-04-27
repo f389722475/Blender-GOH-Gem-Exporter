@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -16,6 +16,7 @@ from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, Po
 from bpy.types import Operator, Panel, PropertyGroup
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 from mathutils import Matrix, Vector
+from mathutils.bvhtree import BVHTree
 
 from .goh_core import (
     AnimationFile,
@@ -48,7 +49,7 @@ from .goh_core import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
-GOH_ADDON_VERSION = "1.1.0"
+GOH_ADDON_VERSION = "1.2.0"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),
@@ -101,6 +102,49 @@ class AttachmentObject:
     obj: bpy.types.Object
     mesh_matrix: Matrix
     attach_bone: str
+
+
+@dataclass
+class AutoQuadCageResult:
+    vertices: list[Vector]
+    faces: list[tuple[int, ...]]
+    mode: str
+    source_face_count: int
+    final_face_count: int
+    report: list[tuple[str, str, float | int | str]]
+    score: float = 0.0
+    iterations: int = 1
+    max_outside: float = 0.0
+
+
+@dataclass
+class AutoConvexSourceGroup:
+    source: bpy.types.Object
+    label: str
+    points: list[Vector]
+    triangles: list[tuple[int, int, int]]
+    vertex_count: int
+
+
+@dataclass
+class AutoConvexBuildTask:
+    source: bpy.types.Object
+    label: str
+    points: list[Vector]
+    triangles: list[tuple[int, int, int]]
+    vertex_count: int
+
+
+@dataclass(frozen=True)
+class AutoQuadCageCandidate:
+    target_faces: int
+    template: str
+    fit_mode: str
+    offset: float
+    smooth_iterations: int
+    planarize_quads: bool
+    planarize_strength: float
+    output_topology: str
 
 
 @dataclass(frozen=True)
@@ -852,6 +896,123 @@ class GOHToolSettings(PropertyGroup):
         ),
         default="BOX",
         translation_context="GOH_PRESET",
+    )
+    auto_convex_template: EnumProperty(
+        name="Cage Template",
+        items=(
+            ("BOX", "Box Cage", "Subdivided cube cage for hard-surface body, turret, and track blocks"),
+            ("ROUNDED_BOX", "Rounded Box", "Rounded box cage for smoother vehicle volumes"),
+            ("SPHERE", "Quad Sphere", "Cube-sphere cage for round turrets, mantlets, and domes"),
+            ("LOFT", "Loft Cage", "Lengthwise profile cage for hulls and turrets with sloped or tapered silhouettes"),
+            ("AUTO", "Auto", "Choose a cage template from the source proportions"),
+        ),
+        default="AUTO",
+        translation_context="GOH_PRESET",
+    )
+    auto_convex_fit_mode: EnumProperty(
+        name="Fit Mode",
+        items=(
+            ("OBB", "OBB Only", "Generate an oriented bounding cage and apply offset"),
+            ("RAY", "Ray Projection", "Project cage vertices radially toward the source surface, then keep an outward offset"),
+        ),
+        default="OBB",
+        translation_context="GOH_PRESET",
+    )
+    auto_convex_output_topology: EnumProperty(
+        name="Output Topology",
+        items=(
+            ("MIXED", "Tri / Quad Legal", "Keep generated triangles and quads; ngons are not allowed"),
+            ("QUAD", "Prefer Quads", "Keep quad cage topology when available"),
+            ("TRIANGULATED", "All Triangles", "Triangulate generated faces before validation/export review"),
+        ),
+        default="MIXED",
+        translation_context="GOH_PRESET",
+    )
+    auto_convex_target_faces: IntProperty(
+        name="Face Budget",
+        description="Per-collision-helper face budget. Triangles and quads are legal; ngons are rejected. Hard maximum is 5000 faces per helper",
+        default=150,
+        min=12,
+        max=5000,
+    )
+    auto_convex_optimize_iterations: IntProperty(
+        name="Optimize Iterations",
+        description="Deterministic reward-guided candidate search iterations per source group",
+        default=12,
+        min=1,
+        max=500,
+        soft_max=100,
+    )
+    auto_convex_max_hulls: IntProperty(
+        name="Max Cages",
+        description="Maximum number of auto collision cage helpers to create from the selected source set",
+        default=32,
+        min=1,
+        max=128,
+    )
+    auto_convex_margin: FloatProperty(
+        name="Offset",
+        description="Extra Blender-unit padding applied to keep the cage outside the source surface",
+        default=0.02,
+        min=0.0,
+        soft_max=0.25,
+        precision=4,
+    )
+    auto_convex_source_scope: EnumProperty(
+        name="Cage Source",
+        items=(
+            ("SELECTED", "Selected", "Generate from selected mesh objects only"),
+            ("HIERARCHY", "Selected + Children", "Generate from selected mesh objects and mesh descendants"),
+        ),
+        default="HIERARCHY",
+        translation_context="GOH_PRESET",
+    )
+    auto_convex_clear_existing: BoolProperty(
+        name="Clear Previous",
+        description="Remove previously generated auto collision cage helpers for the same source objects before creating new ones",
+        default=True,
+    )
+    auto_convex_split_loose_parts: BoolProperty(
+        name="Split Loose Parts",
+        description="Generate separate cages for disconnected mesh islands; useful for hand-picked objects, but can over-spend cage budget on full vehicles",
+        default=False,
+    )
+    auto_convex_min_part_vertices: IntProperty(
+        name="Min Part Vertices",
+        description="Ignore very small loose islands below this unique-vertex count unless they are the only source island",
+        default=20,
+        min=1,
+        max=256,
+    )
+    auto_convex_use_evaluated: BoolProperty(
+        name="Use Modifiers",
+        description="Generate the collider from evaluated mesh data after visible modifiers",
+        default=True,
+    )
+    auto_convex_smooth_display: BoolProperty(
+        name="Smooth Display",
+        description="Use smooth normals on the generated helper for easier viewport inspection without changing the quad topology",
+        default=True,
+    )
+    auto_convex_smooth_iterations: IntProperty(
+        name="Smooth Iterations",
+        description="Taubin smoothing passes after cage fitting",
+        default=3,
+        min=0,
+        max=16,
+    )
+    auto_convex_planarize_quads: BoolProperty(
+        name="Planarize Quads",
+        description="Relax fitted cage vertices toward local quad planes before validation",
+        default=True,
+    )
+    auto_convex_planarize_strength: FloatProperty(
+        name="Planarize Strength",
+        description="How strongly quad vertices are moved toward their face planes",
+        default=0.35,
+        min=0.0,
+        max=1.0,
+        precision=3,
     )
     recoil_axis: EnumProperty(
         name="Recoil Axis",
@@ -7017,6 +7178,15 @@ class SCENE_OT_goh_validate_scene(Operator):
                     warnings.append(f'Cylinder volume "{obj.name}" has no valid goh_volume_axis; default export axis is Z.')
             if volume_kind == "polyhedron" and obj.type == "MESH" and len(obj.data.vertices) > 65535:
                 info.append(f'Volume "{obj.name}" exceeds 65535 vertices and will be split into multiple .vol files.')
+            if volume_kind == "polyhedron" and obj.type == "MESH" and bool(obj.get("goh_auto_quad_cage")):
+                max_faces = int(obj.get("goh_auto_convex_target_faces") or 5000)
+                vertices, faces = _quad_cage_from_mesh_object(obj)
+                quad_report = _validate_quad_cage(vertices, faces, max_faces)
+                for severity, key, value in quad_report:
+                    if severity == "ERROR":
+                        errors.append(f'Auto collision cage "{obj.name}" failed {key}: {value}.')
+                    elif severity == "WARN":
+                        warnings.append(f'Auto collision cage "{obj.name}" warning {key}: {value}.')
 
         for obj in objects:
             if not (_is_tool_obstacle_object(obj) or _is_tool_area_object(obj)):
@@ -7130,6 +7300,1680 @@ class OBJECT_OT_goh_assign_lod_files(Operator):
             return {"CANCELLED"}
         self.report({"INFO"}, f"Assigned LOD file lists to {count} mesh object(s).")
         return {"FINISHED"}
+
+
+def _average_vectors(points: list[Vector]) -> Vector:
+    if not points:
+        return Vector((0.0, 0.0, 0.0))
+    total = Vector((0.0, 0.0, 0.0))
+    for point in points:
+        total += point
+    return total / len(points)
+
+
+def _dedupe_vectors(points: Iterable[Vector], precision: int = 7) -> list[Vector]:
+    unique: list[Vector] = []
+    seen: set[tuple[float, float, float]] = set()
+    for point in points:
+        if not all(math.isfinite(float(value)) for value in point):
+            continue
+        key = tuple(round(float(value), precision) for value in point)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(Vector(key))
+    return unique
+
+
+def _mesh_world_points(
+    context: bpy.types.Context,
+    obj: bpy.types.Object,
+    use_evaluated: bool,
+) -> list[Vector]:
+    if use_evaluated:
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_obj = obj.evaluated_get(depsgraph)
+        mesh = eval_obj.to_mesh()
+        if mesh is None:
+            return []
+        try:
+            matrix = eval_obj.matrix_world.copy()
+            return _dedupe_vectors(matrix @ vertex.co for vertex in mesh.vertices)
+        finally:
+            eval_obj.to_mesh_clear()
+
+    matrix = obj.matrix_world.copy()
+    return _dedupe_vectors(matrix @ vertex.co for vertex in obj.data.vertices)
+
+
+def _iter_object_tree(obj: bpy.types.Object) -> Iterable[bpy.types.Object]:
+    yield obj
+    for child in obj.children:
+        yield from _iter_object_tree(child)
+
+
+def _auto_convex_source_objects(context: bpy.types.Context, include_children: bool) -> list[bpy.types.Object]:
+    seen: set[int] = set()
+    objects: list[bpy.types.Object] = []
+    for selected in context.selected_objects:
+        candidates = _iter_object_tree(selected) if include_children else (selected,)
+        for obj in candidates:
+            if obj.type != "MESH" or _is_tool_helper_object(obj):
+                continue
+            pointer = obj.as_pointer()
+            if pointer in seen:
+                continue
+            seen.add(pointer)
+            objects.append(obj)
+    return sorted(objects, key=lambda item: item.name.lower())
+
+
+def _mesh_connected_components_from_edges(
+    vertex_count: int,
+    edges: Iterable[tuple[int, int]],
+    triangles: Iterable[tuple[int, int, int]],
+) -> list[list[int]]:
+    if vertex_count == 0:
+        return []
+    adjacency: list[set[int]] = [set() for _index in range(vertex_count)]
+    for a, b in edges:
+        if a == b or a < 0 or b < 0 or a >= vertex_count or b >= vertex_count:
+            continue
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+    for a, b, c in triangles:
+        for left, right in ((a, b), (b, c), (c, a)):
+            if left == right or left < 0 or right < 0 or left >= vertex_count or right >= vertex_count:
+                continue
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+
+    components: list[list[int]] = []
+    visited: set[int] = set()
+    for start in range(vertex_count):
+        if start in visited:
+            continue
+        stack = [start]
+        visited.add(start)
+        component: list[int] = []
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in adjacency[current]:
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                stack.append(neighbor)
+        components.append(component)
+    return components
+
+
+def _mesh_world_surface_data(
+    context: bpy.types.Context,
+    obj: bpy.types.Object,
+    use_evaluated: bool,
+) -> tuple[list[Vector], list[tuple[int, int, int]], list[tuple[int, int]]]:
+    eval_obj = None
+    mesh = None
+    if use_evaluated:
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_obj = obj.evaluated_get(depsgraph)
+        mesh = eval_obj.to_mesh()
+        matrix = eval_obj.matrix_world.copy()
+    else:
+        mesh = obj.data
+        matrix = obj.matrix_world.copy()
+
+    if mesh is None:
+        return [], [], []
+
+    try:
+        vertices = [matrix @ vertex.co for vertex in mesh.vertices]
+        triangles: list[tuple[int, int, int]] = []
+        edges: set[tuple[int, int]] = set()
+        for edge in mesh.edges:
+            a, b = int(edge.vertices[0]), int(edge.vertices[1])
+            edges.add((min(a, b), max(a, b)))
+        for polygon in mesh.polygons:
+            indices = [int(index) for index in polygon.vertices]
+            if len(indices) < 3:
+                continue
+            for index, current in enumerate(indices):
+                nxt = indices[(index + 1) % len(indices)]
+                edges.add((min(current, nxt), max(current, nxt)))
+            for index in range(1, len(indices) - 1):
+                triangles.append((indices[0], indices[index], indices[index + 1]))
+        return vertices, triangles, sorted(edges)
+    finally:
+        if eval_obj is not None:
+            eval_obj.to_mesh_clear()
+
+
+def _mesh_world_point_groups(
+    context: bpy.types.Context,
+    obj: bpy.types.Object,
+    use_evaluated: bool,
+    split_loose_parts: bool,
+    min_part_vertices: int,
+) -> list[AutoConvexSourceGroup]:
+    vertices, triangles, edges = _mesh_world_surface_data(context, obj, use_evaluated)
+    if not vertices:
+        return []
+
+    if split_loose_parts:
+        components = _mesh_connected_components_from_edges(len(vertices), edges, triangles)
+    else:
+        components = [list(range(len(vertices)))]
+
+    groups: list[AutoConvexSourceGroup] = []
+    fallback_groups: list[AutoConvexSourceGroup] = []
+    for index, component in enumerate(components, start=1):
+        component_set = set(component)
+        used = sorted(component_set)
+        if not used:
+            continue
+        remap = {old_index: new_index for new_index, old_index in enumerate(used)}
+        points = [vertices[old_index].copy() for old_index in used]
+        if not points:
+            continue
+        group_triangles = [
+            (remap[a], remap[b], remap[c])
+            for a, b, c in triangles
+            if a in component_set and b in component_set and c in component_set
+        ]
+        label = f"island{index:02d}" if len(components) > 1 else ""
+        group = AutoConvexSourceGroup(
+            source=obj,
+            label=label,
+            points=points,
+            triangles=group_triangles,
+            vertex_count=len(points),
+        )
+        fallback_groups.append(group)
+        if len(points) >= max(1, int(min_part_vertices)):
+            groups.append(group)
+
+    if groups:
+        return groups
+    return sorted(fallback_groups, key=lambda group: group.vertex_count, reverse=True)[:1]
+
+
+def _auto_convex_subdivision_for_budget(face_budget: int) -> int:
+    budget = max(6, int(face_budget))
+    return max(1, int(math.floor(math.sqrt(budget / 6.0))))
+
+
+def _auto_quad_face_budget_limit(face_budget: int) -> int:
+    return max(6, min(5000, int(face_budget)))
+
+
+def _auto_quad_generation_budget(face_budget: int, output_topology: str) -> int:
+    budget = _auto_quad_face_budget_limit(face_budget)
+    if str(output_topology).upper() == "TRIANGULATED":
+        return max(6, budget // 2)
+    return budget
+
+
+def _apply_auto_quad_output_topology(
+    faces: list[tuple[int, ...]],
+    output_topology: str,
+) -> list[tuple[int, ...]]:
+    if str(output_topology).upper() == "TRIANGULATED":
+        return _triangulate_legal_faces(faces)
+    return [tuple(face) for face in faces]
+
+
+def _quad_cage_face_budget(n: int) -> int:
+    return 6 * int(n) * int(n)
+
+
+def _add_grid_vertex(
+    vertices: list[Vector],
+    lookup: dict[tuple[float, float, float], int],
+    coord: tuple[float, float, float],
+) -> int:
+    key = (round(coord[0], 8), round(coord[1], 8), round(coord[2], 8))
+    existing = lookup.get(key)
+    if existing is not None:
+        return existing
+    lookup[key] = len(vertices)
+    vertices.append(Vector(key))
+    return lookup[key]
+
+
+def _build_subdivided_cube_cage(n: int) -> tuple[list[Vector], list[tuple[int, int, int, int]]]:
+    n = max(1, int(n))
+    values = [-0.5 + step / n for step in range(n + 1)]
+    vertices: list[Vector] = []
+    lookup: dict[tuple[float, float, float], int] = {}
+    faces: list[tuple[int, int, int, int]] = []
+
+    def v(coord: tuple[float, float, float]) -> int:
+        return _add_grid_vertex(vertices, lookup, coord)
+
+    for fixed in (-0.5, 0.5):
+        for i in range(n):
+            for j in range(n):
+                y0, y1 = values[i], values[i + 1]
+                z0, z1 = values[j], values[j + 1]
+                if fixed > 0:
+                    faces.append((v((fixed, y0, z0)), v((fixed, y1, z0)), v((fixed, y1, z1)), v((fixed, y0, z1))))
+                else:
+                    faces.append((v((fixed, y0, z0)), v((fixed, y0, z1)), v((fixed, y1, z1)), v((fixed, y1, z0))))
+
+    for fixed in (-0.5, 0.5):
+        for i in range(n):
+            for j in range(n):
+                x0, x1 = values[i], values[i + 1]
+                z0, z1 = values[j], values[j + 1]
+                if fixed > 0:
+                    faces.append((v((x0, fixed, z0)), v((x0, fixed, z1)), v((x1, fixed, z1)), v((x1, fixed, z0))))
+                else:
+                    faces.append((v((x0, fixed, z0)), v((x1, fixed, z0)), v((x1, fixed, z1)), v((x0, fixed, z1))))
+
+    for fixed in (-0.5, 0.5):
+        for i in range(n):
+            for j in range(n):
+                x0, x1 = values[i], values[i + 1]
+                y0, y1 = values[j], values[j + 1]
+                if fixed > 0:
+                    faces.append((v((x0, y0, fixed)), v((x1, y0, fixed)), v((x1, y1, fixed)), v((x0, y1, fixed))))
+                else:
+                    faces.append((v((x0, y0, fixed)), v((x0, y1, fixed)), v((x1, y1, fixed)), v((x1, y0, fixed))))
+
+    if _quad_cage_signed_volume(vertices, faces) < 0.0:
+        faces = [tuple(reversed(face)) for face in faces]
+    return vertices, faces
+
+
+def _cube_sphere_point(point: Vector) -> Vector:
+    x, y, z = point.x * 2.0, point.y * 2.0, point.z * 2.0
+    sx = x * math.sqrt(max(0.0, 1.0 - y * y * 0.5 - z * z * 0.5 + y * y * z * z / 3.0))
+    sy = y * math.sqrt(max(0.0, 1.0 - z * z * 0.5 - x * x * 0.5 + z * z * x * x / 3.0))
+    sz = z * math.sqrt(max(0.0, 1.0 - x * x * 0.5 - y * y * 0.5 + x * x * y * y / 3.0))
+    return Vector((sx, sy, sz)) * 0.5
+
+
+def _apply_quad_cage_template(vertices: list[Vector], template: str, source_size: Vector) -> list[Vector]:
+    template = template.upper()
+    if template == "AUTO":
+        longest = max(source_size.x, source_size.y, source_size.z)
+        shortest = max(min(source_size.x, source_size.y, source_size.z), EPSILON)
+        template = "SPHERE" if longest / shortest < 1.35 else "ROUNDED_BOX"
+    if template == "SPHERE":
+        return [_cube_sphere_point(vertex) for vertex in vertices]
+    if template == "ROUNDED_BOX":
+        roundness = 0.18
+        return [vertex.lerp(_cube_sphere_point(vertex), roundness) for vertex in vertices]
+    return [vertex.copy() for vertex in vertices]
+
+
+def _auto_quad_source_text(group: AutoConvexSourceGroup | AutoConvexBuildTask) -> str:
+    source = group.source
+    return " ".join(
+        str(value or "").lower()
+        for value in (
+            source.name,
+            source.get("goh_bone_name"),
+            source.get("goh_export_name"),
+            source.get("goh_part"),
+            group.label,
+        )
+    )
+
+
+def _auto_quad_part_category(group: AutoConvexSourceGroup | AutoConvexBuildTask) -> str:
+    text = _auto_quad_source_text(group)
+    if any(token in text for token in ("gun", "barrel", "cannon", "muzzle")):
+        return "gun"
+    if any(token in text for token in ("turret", "mantlet", "mantled")):
+        return "turret"
+    if any(token in text for token in ("track", "wheel", "suspension")):
+        return "track"
+    if any(token in text for token in ("body", "hull", "root", "x_root", "chassis")):
+        return "body"
+    return "other"
+
+
+def _covariance_axes(points: list[Vector]) -> tuple[Vector, Vector, Vector]:
+    if len(points) < 3:
+        return Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0)), Vector((0.0, 0.0, 1.0))
+    center = _average_vectors(points)
+    matrix = [[0.0, 0.0, 0.0] for _row in range(3)]
+    for point in points:
+        delta = point - center
+        values = (delta.x, delta.y, delta.z)
+        for row in range(3):
+            for column in range(3):
+                matrix[row][column] += values[row] * values[column]
+    inv_count = 1.0 / max(1, len(points))
+    for row in range(3):
+        for column in range(3):
+            matrix[row][column] *= inv_count
+
+    def mat_vec(mat: list[list[float]], vector: Vector) -> Vector:
+        return Vector((
+            mat[0][0] * vector.x + mat[0][1] * vector.y + mat[0][2] * vector.z,
+            mat[1][0] * vector.x + mat[1][1] * vector.y + mat[1][2] * vector.z,
+            mat[2][0] * vector.x + mat[2][1] * vector.y + mat[2][2] * vector.z,
+        ))
+
+    def power_axis(mat: list[list[float]], seed: Vector) -> tuple[Vector, float]:
+        axis = seed.normalized()
+        for _iteration in range(32):
+            nxt = mat_vec(mat, axis)
+            if nxt.length <= EPSILON:
+                break
+            axis = nxt.normalized()
+        return axis, axis.dot(mat_vec(mat, axis))
+
+    axis_a, value_a = power_axis(matrix, Vector((1.0, 0.37, 0.19)))
+    deflated = [[matrix[row][column] - value_a * axis_a[row] * axis_a[column] for column in range(3)] for row in range(3)]
+    seed_b = Vector((0.23, 1.0, 0.41))
+    seed_b -= axis_a * seed_b.dot(axis_a)
+    if seed_b.length <= EPSILON:
+        seed_b = axis_a.cross(Vector((0.0, 0.0, 1.0)))
+    if seed_b.length <= EPSILON:
+        seed_b = Vector((0.0, 1.0, 0.0))
+    axis_b, _value_b = power_axis(deflated, seed_b)
+    axis_b -= axis_a * axis_b.dot(axis_a)
+    if axis_b.length <= EPSILON:
+        axis_b = axis_a.cross(Vector((0.0, 0.0, 1.0)))
+    if axis_b.length <= EPSILON:
+        axis_b = Vector((0.0, 1.0, 0.0))
+    axis_b.normalize()
+    axis_c = axis_a.cross(axis_b)
+    if axis_c.length <= EPSILON:
+        axis_c = Vector((0.0, 0.0, 1.0))
+    axis_c.normalize()
+    axis_b = axis_c.cross(axis_a).normalized()
+
+    axes = [axis_a.normalized(), axis_b, axis_c]
+    extents = []
+    for axis in axes:
+        values = [point.dot(axis) for point in points]
+        extents.append(max(values) - min(values))
+    order = sorted(range(3), key=lambda index: extents[index], reverse=True)
+    axes = [axes[index] for index in order]
+    if axes[0].cross(axes[1]).dot(axes[2]) < 0.0:
+        axes[2].negate()
+    return axes[0], axes[1], axes[2]
+
+
+def _horizontal_vehicle_axes(points: list[Vector]) -> tuple[Vector, Vector, Vector] | None:
+    if len(points) < 3:
+        return None
+    min_corner, max_corner = _point_bounds(points)
+    size = max_corner - min_corner
+    horizontal_extent = max(float(size.x), float(size.y))
+    if horizontal_extent <= max(float(size.z) * 1.05, EPSILON):
+        return None
+    center = _average_vectors(points)
+    covariance_xx = 0.0
+    covariance_xy = 0.0
+    covariance_yy = 0.0
+    for point in points:
+        dx = float(point.x - center.x)
+        dy = float(point.y - center.y)
+        covariance_xx += dx * dx
+        covariance_xy += dx * dy
+        covariance_yy += dy * dy
+    if abs(covariance_xx) + abs(covariance_yy) <= EPSILON:
+        axis_a = Vector((1.0, 0.0, 0.0)) if size.x >= size.y else Vector((0.0, 1.0, 0.0))
+    else:
+        angle = 0.5 * math.atan2(2.0 * covariance_xy, covariance_xx - covariance_yy)
+        axis_a = Vector((math.cos(angle), math.sin(angle), 0.0))
+    if axis_a.length <= EPSILON:
+        axis_a = Vector((1.0, 0.0, 0.0))
+    axis_a.normalize()
+    axis_b = Vector((-axis_a.y, axis_a.x, 0.0))
+    axis_c = Vector((0.0, 0.0, 1.0))
+
+    extent_a = max(point.dot(axis_a) for point in points) - min(point.dot(axis_a) for point in points)
+    extent_b = max(point.dot(axis_b) for point in points) - min(point.dot(axis_b) for point in points)
+    if extent_b > extent_a:
+        axis_a, axis_b = axis_b, -axis_a
+    if axis_a.cross(axis_b).dot(axis_c) < 0.0:
+        axis_b.negate()
+    return axis_a.normalized(), axis_b.normalized(), axis_c
+
+
+def _auto_quad_axes_for_group(
+    group: AutoConvexSourceGroup | AutoConvexBuildTask,
+    category: str,
+) -> tuple[Vector, Vector, Vector]:
+    if category in {"body", "turret", "track", "gun"}:
+        axes = _horizontal_vehicle_axes(group.points)
+        if axes is not None:
+            return axes
+    return _covariance_axes(group.points)
+
+
+def _oriented_bounds_from_axes(
+    points: list[Vector],
+    axes: tuple[Vector, Vector, Vector],
+    offset: float,
+) -> tuple[Vector, tuple[Vector, Vector, Vector], Vector]:
+    center = _average_vectors(points)
+    min_values: list[float] = []
+    max_values: list[float] = []
+    for axis in axes:
+        projections = [(point - center).dot(axis) for point in points]
+        min_values.append(min(projections))
+        max_values.append(max(projections))
+    obb_center = center.copy()
+    for axis, min_value, max_value in zip(axes, min_values, max_values):
+        obb_center += axis * ((min_value + max_value) * 0.5)
+    sizes = Vector(tuple(max(max_value - min_value + 2.0 * float(offset), float(offset) * 2.0 + EPSILON) for min_value, max_value in zip(min_values, max_values)))
+    return obb_center, axes, sizes
+
+
+def _obb_from_points(points: list[Vector], offset: float) -> tuple[Vector, tuple[Vector, Vector, Vector], Vector]:
+    return _oriented_bounds_from_axes(points, _covariance_axes(points), offset)
+
+
+def _align_template_to_obb(
+    local_vertices: list[Vector],
+    center: Vector,
+    axes: tuple[Vector, Vector, Vector],
+    size: Vector,
+) -> list[Vector]:
+    return [
+        center + axes[0] * (vertex.x * size.x) + axes[1] * (vertex.y * size.y) + axes[2] * (vertex.z * size.z)
+        for vertex in local_vertices
+    ]
+
+
+def _auto_quad_should_use_loft(template: str, category: str, size: Vector) -> bool:
+    template = template.upper()
+    if template == "LOFT":
+        return True
+    if template != "AUTO" or category not in {"body", "turret"}:
+        return False
+    horizontal_long = max(float(size.x), float(size.y))
+    horizontal_short = max(min(float(size.x), float(size.y)), EPSILON)
+    vertical = max(float(size.z), EPSILON)
+    if horizontal_long < 1.20:
+        return False
+    if category == "body":
+        return horizontal_long / vertical >= 1.55 and horizontal_long / horizontal_short >= 1.35
+    return horizontal_long / vertical >= 1.45
+
+
+def _resolve_auto_quad_template(
+    template: str,
+    category: str,
+    group: AutoConvexSourceGroup | AutoConvexBuildTask,
+    size: Vector,
+) -> str:
+    template = template.upper()
+    if template != "AUTO":
+        return template
+    text = _auto_quad_source_text(group)
+    longest = max(float(size.x), float(size.y), float(size.z))
+    shortest = max(min(float(size.x), float(size.y), float(size.z)), EPSILON)
+    rounded_tokens = ("cupola", "dome", "mantlet", "mantled", "ball", "sphere")
+    if any(token in text for token in rounded_tokens):
+        return "SPHERE"
+    if category == "turret" and longest / shortest < 1.55:
+        return "SPHERE"
+    return "ROUNDED_BOX"
+
+
+def _loft_ring_sides_for_budget(face_budget: int) -> int:
+    budget = int(face_budget)
+    if budget <= 60:
+        return 6
+    if budget <= 110:
+        return 8
+    if budget <= 180:
+        return 10
+    if budget <= 240:
+        return 12
+    return 14
+
+
+def _smooth_numeric_profile(values: list[float], passes: int = 2) -> list[float]:
+    if len(values) < 3:
+        return list(values)
+    current = list(values)
+    for _pass in range(max(0, int(passes))):
+        nxt = list(current)
+        for index in range(1, len(current) - 1):
+            nxt[index] = (current[index - 1] + current[index] * 2.0 + current[index + 1]) * 0.25
+        current = nxt
+    return current
+
+
+def _build_loft_quad_cage(
+    points: list[Vector],
+    axes: tuple[Vector, Vector, Vector],
+    face_budget: int,
+    offset: float,
+) -> tuple[list[Vector], list[tuple[int, int, int, int]]]:
+    sides = _loft_ring_sides_for_budget(face_budget)
+    rings = max(4, int(face_budget) // sides)
+    origin = _average_vectors(points)
+    local_points = [
+        (
+            (point - origin).dot(axes[0]),
+            (point - origin).dot(axes[1]),
+            (point - origin).dot(axes[2]),
+        )
+        for point in points
+    ]
+    min_a = min(point[0] for point in local_points)
+    max_a = max(point[0] for point in local_points)
+    length = max(max_a - min_a, EPSILON)
+    step = length / max(1, rings - 1)
+    slab = step * 0.90
+    station_values = [min_a - offset + (length + 2.0 * offset) * index / max(1, rings - 1) for index in range(rings)]
+
+    center_b_values: list[float] = []
+    center_c_values: list[float] = []
+    half_c_values: list[float] = []
+    half_b_bottom_values: list[float] = []
+    half_b_top_values: list[float] = []
+
+    for station in station_values:
+        station_core = max(min_a, min(max_a, station))
+        selected = [point for point in local_points if abs(point[0] - station_core) <= slab]
+        if len(selected) < 6:
+            selected = sorted(local_points, key=lambda point: abs(point[0] - station_core))[:max(6, min(len(local_points), sides * 2))]
+        b_values = [point[1] for point in selected]
+        c_values = [point[2] for point in selected]
+        center_b = (min(b_values) + max(b_values)) * 0.5
+        center_c = (min(c_values) + max(c_values)) * 0.5
+        half_b = (max(b_values) - min(b_values)) * 0.5 + offset
+        half_c = (max(c_values) - min(c_values)) * 0.5 + offset
+        lower_b = [point[1] for point in selected if point[2] <= center_c]
+        upper_b = [point[1] for point in selected if point[2] >= center_c]
+        half_b_bottom = ((max(lower_b) - min(lower_b)) * 0.5 + offset) if len(lower_b) >= 2 else half_b
+        half_b_top = ((max(upper_b) - min(upper_b)) * 0.5 + offset) if len(upper_b) >= 2 else half_b
+        center_b_values.append(center_b)
+        center_c_values.append(center_c)
+        half_c_values.append(max(half_c, offset + EPSILON))
+        half_b_bottom_values.append(max(half_b_bottom, offset + EPSILON))
+        half_b_top_values.append(max(half_b_top, offset + EPSILON))
+
+    center_b_values = _smooth_numeric_profile(center_b_values)
+    center_c_values = _smooth_numeric_profile(center_c_values)
+    half_c_values = _smooth_numeric_profile(half_c_values)
+    half_b_bottom_values = _smooth_numeric_profile(half_b_bottom_values)
+    half_b_top_values = _smooth_numeric_profile(half_b_top_values)
+
+    vertices: list[Vector] = []
+    ring_indices: list[list[int]] = []
+    superellipse_exponent = 0.42
+    for ring_index, station in enumerate(station_values):
+        ring: list[int] = []
+        for side_index in range(sides):
+            angle = 2.0 * math.pi * side_index / sides
+            cosine = math.cos(angle)
+            sine = math.sin(angle)
+            half_b = half_b_top_values[ring_index] if sine >= 0.0 else half_b_bottom_values[ring_index]
+            b_offset = math.copysign(abs(cosine) ** superellipse_exponent, cosine) * half_b
+            c_offset = math.copysign(abs(sine) ** superellipse_exponent, sine) * half_c_values[ring_index]
+            vertices.append(
+                origin
+                + axes[0] * station
+                + axes[1] * (center_b_values[ring_index] + b_offset)
+                + axes[2] * (center_c_values[ring_index] + c_offset)
+            )
+            ring.append(len(vertices) - 1)
+        ring_indices.append(ring)
+
+    faces: list[tuple[int, int, int, int]] = []
+    for ring_index in range(rings - 1):
+        current = ring_indices[ring_index]
+        nxt = ring_indices[ring_index + 1]
+        for side_index in range(sides):
+            following = (side_index + 1) % sides
+            faces.append((current[side_index], nxt[side_index], nxt[following], current[following]))
+
+    def cap_center(ring_index: int) -> int:
+        station = station_values[ring_index]
+        vertices.append(origin + axes[0] * station + axes[1] * center_b_values[ring_index] + axes[2] * center_c_values[ring_index])
+        return len(vertices) - 1
+
+    start_center = cap_center(0)
+    end_center = cap_center(rings - 1)
+    start_ring = ring_indices[0]
+    end_ring = ring_indices[-1]
+    for side_index in range(0, sides, 2):
+        faces.append((start_center, start_ring[(side_index + 2) % sides], start_ring[(side_index + 1) % sides], start_ring[side_index]))
+        faces.append((end_center, end_ring[side_index], end_ring[(side_index + 1) % sides], end_ring[(side_index + 2) % sides]))
+
+    if _quad_cage_signed_volume(vertices, faces) < 0.0:
+        faces = [tuple(reversed(face)) for face in faces]
+    return vertices, faces
+
+
+def _quad_cage_triangles(faces: Iterable[tuple[int, ...]]) -> list[tuple[int, int, int]]:
+    triangles: list[tuple[int, int, int]] = []
+    for face in faces:
+        if len(face) == 3:
+            triangles.append((face[0], face[1], face[2]))
+        elif len(face) == 4:
+            a, b, c, d = face
+            triangles.append((a, b, c))
+            triangles.append((a, c, d))
+        elif len(face) > 4:
+            for index in range(1, len(face) - 1):
+                triangles.append((face[0], face[index], face[index + 1]))
+    return triangles
+
+
+def _quad_cage_signed_volume(vertices: list[Vector], faces: Iterable[tuple[int, ...]]) -> float:
+    volume = 0.0
+    for a, b, c in _quad_cage_triangles(faces):
+        volume += vertices[a].dot(vertices[b].cross(vertices[c])) / 6.0
+    return volume
+
+
+def _quad_cage_planes(
+    vertices: list[Vector],
+    faces: Iterable[tuple[int, ...]],
+) -> list[tuple[Vector, Vector]]:
+    center = _average_vectors(vertices)
+    planes: list[tuple[Vector, Vector]] = []
+    for face in faces:
+        if len(face) < 3:
+            continue
+        points = [vertices[index] for index in face]
+        normal = (points[1] - points[0]).cross(points[2] - points[0])
+        if normal.length <= EPSILON and len(points) >= 4:
+            normal = (points[2] - points[0]).cross(points[3] - points[0])
+        if normal.length <= EPSILON:
+            continue
+        normal.normalize()
+        face_center = _average_vectors(points)
+        if normal.dot(face_center - center) < 0.0:
+            normal.negate()
+        planes.append((normal, points[0]))
+    return planes
+
+
+def _max_outside_distance_quads(
+    vertices: list[Vector],
+    faces: list[tuple[int, ...]],
+    source_points: list[Vector],
+) -> float:
+    planes = _quad_cage_planes(vertices, faces)
+    if not planes:
+        return math.inf
+    max_distance = -math.inf
+    for normal, plane_point in planes:
+        for source_point in source_points:
+            max_distance = max(max_distance, normal.dot(source_point - plane_point))
+    return max_distance
+
+
+def _expand_quad_cage_to_cover_points(
+    vertices: list[Vector],
+    faces: list[tuple[int, ...]],
+    source_points: list[Vector],
+    offset: float,
+    max_scale_factor: float = 3.0,
+) -> tuple[list[Vector], float]:
+    center = _average_vectors(vertices)
+    scale_factor = 1.0
+    scale_limit = max(1.0, float(max_scale_factor))
+    for normal, plane_point in _quad_cage_planes(vertices, faces):
+        denom = normal.dot(plane_point - center)
+        if denom <= EPSILON:
+            continue
+        max_distance = max(normal.dot(source_point - plane_point) for source_point in source_points)
+        required = max_distance + max(0.0, float(offset))
+        if required > EPSILON:
+            scale_factor = max(scale_factor, 1.0 + required / denom)
+            if scale_factor >= scale_limit:
+                scale_factor = scale_limit
+                break
+    if scale_factor > 1.0 + EPSILON:
+        vertices = [center + (vertex - center) * scale_factor for vertex in vertices]
+    return vertices, _max_outside_distance_quads(vertices, faces, source_points)
+
+
+def _auto_quad_fit_points(points: list[Vector], max_points: int = 1200) -> list[Vector]:
+    if len(points) <= max_points:
+        return points
+    selected: set[int] = {0, len(points) - 1}
+    axes = ("x", "y", "z")
+    for axis in axes:
+        selected.add(min(range(len(points)), key=lambda index: getattr(points[index], axis)))
+        selected.add(max(range(len(points)), key=lambda index: getattr(points[index], axis)))
+    stride = max(1, int(math.ceil(len(points) / max(1, max_points - len(selected)))))
+    for index in range(0, len(points), stride):
+        selected.add(index)
+        if len(selected) >= max_points:
+            break
+    return [points[index] for index in sorted(selected)]
+
+
+def _point_bounds(points: list[Vector]) -> tuple[Vector, Vector]:
+    return (
+        Vector((
+            min(point.x for point in points),
+            min(point.y for point in points),
+            min(point.z for point in points),
+        )),
+        Vector((
+            max(point.x for point in points),
+            max(point.y for point in points),
+            max(point.z for point in points),
+        )),
+    )
+
+
+def _point_bounds_volume(points: list[Vector]) -> float:
+    min_corner, max_corner = _point_bounds(points)
+    size = max_corner - min_corner
+    return max(float(size.x), EPSILON) * max(float(size.y), EPSILON) * max(float(size.z), EPSILON)
+
+
+def _select_auto_quad_cage_source_groups(
+    groups: list[AutoConvexSourceGroup],
+    max_hulls: int,
+) -> list[AutoConvexSourceGroup]:
+    max_hulls = max(1, int(max_hulls))
+    remaining = list(groups)
+    selected: list[AutoConvexSourceGroup] = []
+    source_counts: dict[int, int] = {}
+
+    while remaining and len(selected) < max_hulls:
+        def priority(group: AutoConvexSourceGroup) -> float:
+            source_key = group.source.as_pointer()
+            source_count = source_counts.get(source_key, 0)
+            volume = _point_bounds_volume(group.points)
+            return volume / ((source_count + 1) ** 1.35)
+
+        best_index = max(range(len(remaining)), key=lambda index: priority(remaining[index]))
+        group = remaining.pop(best_index)
+        selected.append(group)
+        source_key = group.source.as_pointer()
+        source_counts[source_key] = source_counts.get(source_key, 0) + 1
+
+    return selected
+
+
+def _build_auto_quad_cage_task_queue(
+    groups: list[AutoConvexSourceGroup],
+    max_hulls: int,
+) -> tuple[list[AutoConvexBuildTask], int]:
+    selected_groups = _select_auto_quad_cage_source_groups(groups, max_hulls)
+    dropped = max(0, len(groups) - len(selected_groups))
+    tasks = [
+        AutoConvexBuildTask(
+            source=group.source,
+            label=group.label,
+            points=group.points,
+            triangles=group.triangles,
+            vertex_count=group.vertex_count,
+        )
+        for group in selected_groups
+    ]
+    return sorted(tasks, key=lambda task: _point_bounds_volume(task.points), reverse=True), dropped
+
+
+def _quad_cage_vertex_neighbors(
+    faces: list[tuple[int, ...]],
+    vertex_count: int,
+) -> list[set[int]]:
+    neighbors: list[set[int]] = [set() for _index in range(vertex_count)]
+    for face in faces:
+        for index, vertex_index in enumerate(face):
+            previous_index = face[index - 1]
+            next_index = face[(index + 1) % len(face)]
+            if 0 <= vertex_index < vertex_count:
+                if 0 <= previous_index < vertex_count:
+                    neighbors[vertex_index].add(previous_index)
+                if 0 <= next_index < vertex_count:
+                    neighbors[vertex_index].add(next_index)
+    return neighbors
+
+
+def _quad_cage_face_planarity(vertices: list[Vector], face: tuple[int, ...]) -> float:
+    if len(face) == 3:
+        return 0.0
+    points = [vertices[index] for index in face]
+    normal = (points[1] - points[0]).cross(points[2] - points[0])
+    if normal.length <= EPSILON:
+        return math.inf
+    normal.normalize()
+    diagonal = max((points[2] - points[0]).length, (points[3] - points[1]).length, EPSILON)
+    return abs(normal.dot(points[3] - points[0])) / diagonal
+
+
+def _quad_cage_face_edge_ratio(vertices: list[Vector], face: tuple[int, ...]) -> float:
+    lengths = [
+        (vertices[face[(index + 1) % len(face)]] - vertices[face[index]]).length
+        for index in range(len(face))
+    ]
+    shortest = max(min(lengths), EPSILON)
+    return max(lengths) / shortest
+
+
+def _triangle_quality(vertices: list[Vector], face: tuple[int, ...]) -> float:
+    if len(face) != 3:
+        return 1.0
+    a = (vertices[face[1]] - vertices[face[0]]).length
+    b = (vertices[face[2]] - vertices[face[1]]).length
+    c = (vertices[face[0]] - vertices[face[2]]).length
+    area = (vertices[face[1]] - vertices[face[0]]).cross(vertices[face[2]] - vertices[face[0]]).length * 0.5
+    denom = a * a + b * b + c * c
+    if denom <= EPSILON:
+        return 0.0
+    return max(0.0, min(1.0, 4.0 * math.sqrt(3.0) * area / denom))
+
+
+def _polygon_area(vertices: list[Vector], face: tuple[int, ...]) -> float:
+    if len(face) < 3:
+        return 0.0
+    origin = vertices[face[0]]
+    area = 0.0
+    for index in range(1, len(face) - 1):
+        area += (vertices[face[index]] - origin).cross(vertices[face[index + 1]] - origin).length * 0.5
+    return area
+
+
+def _triangulate_legal_faces(faces: list[tuple[int, ...]]) -> list[tuple[int, ...]]:
+    triangulated: list[tuple[int, ...]] = []
+    for face in faces:
+        if len(face) == 3:
+            triangulated.append(face)
+        elif len(face) == 4:
+            a, b, c, d = face
+            triangulated.append((a, b, c))
+            triangulated.append((a, c, d))
+        elif len(face) > 4:
+            for index in range(1, len(face) - 1):
+                triangulated.append((face[0], face[index], face[index + 1]))
+    return triangulated
+
+
+def _validate_quad_cage(
+    vertices: list[Vector],
+    faces: list[tuple[int, ...]],
+    max_faces: int,
+) -> list[tuple[str, str, float | int | str]]:
+    report: list[tuple[str, str, float | int | str]] = [
+        ("INFO", "vertices", len(vertices)),
+        ("INFO", "faces", len(faces)),
+    ]
+    if not vertices or not faces:
+        report.append(("ERROR", "empty", "cage has no vertices or faces"))
+        return report
+    invalid_face_count = sum(1 for face in faces if len(face) not in {3, 4})
+    if invalid_face_count:
+        report.append(("ERROR", "invalid_face_sides", invalid_face_count))
+        return report
+    if len(faces) > int(max_faces):
+        report.append(("ERROR", "face_budget", f"{len(faces)}>{int(max_faces)}"))
+
+    edge_use: dict[tuple[int, int], int] = {}
+    adjacency: list[set[int]] = [set() for _index in vertices]
+    degenerate_faces = 0
+    for face in faces:
+        has_invalid_index = any(vertex_index < 0 or vertex_index >= len(vertices) for vertex_index in face)
+        if len(set(face)) != len(face) or (not has_invalid_index and _polygon_area(vertices, face) <= EPSILON):
+            degenerate_faces += 1
+        for index, a in enumerate(face):
+            b = face[(index + 1) % len(face)]
+            if a < 0 or b < 0 or a >= len(vertices) or b >= len(vertices) or a == b:
+                report.append(("ERROR", "invalid_edge", f"{a},{b}"))
+                continue
+            key = (min(a, b), max(a, b))
+            edge_use[key] = edge_use.get(key, 0) + 1
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+    if degenerate_faces:
+        report.append(("ERROR", "degenerate_faces", degenerate_faces))
+
+    boundary_edges = sum(1 for count in edge_use.values() if count == 1)
+    non_manifold_edges = sum(1 for count in edge_use.values() if count > 2)
+    if boundary_edges:
+        report.append(("ERROR", "boundary_edges", boundary_edges))
+    if non_manifold_edges:
+        report.append(("ERROR", "non_manifold_edges", non_manifold_edges))
+
+    visited: set[int] = set()
+    components = 0
+    for start in range(len(vertices)):
+        if start in visited or not adjacency[start]:
+            continue
+        components += 1
+        stack = [start]
+        visited.add(start)
+        while stack:
+            current = stack.pop()
+            for neighbor in adjacency[current]:
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                stack.append(neighbor)
+    if components != 1:
+        report.append(("ERROR", "components", components))
+
+    euler = len(vertices) - len(edge_use) + len(faces)
+    report.append(("INFO", "euler", euler))
+    if euler != 2:
+        report.append(("ERROR", "euler_not_sphere", euler))
+
+    signed_volume = _quad_cage_signed_volume(vertices, faces)
+    report.append(("INFO", "signed_volume", float(signed_volume)))
+    if signed_volume <= EPSILON:
+        report.append(("ERROR", "volume_orientation", float(signed_volume)))
+
+    planarity_values = [_quad_cage_face_planarity(vertices, face) for face in faces if len(face) == 4]
+    bad_planarity = sum(1 for value in planarity_values if value > 0.08)
+    if bad_planarity:
+        report.append(("WARN", "non_planar_quads", bad_planarity))
+    edge_ratios = [_quad_cage_face_edge_ratio(vertices, face) for face in faces]
+    stretched = sum(1 for value in edge_ratios if value > 10.0)
+    if stretched:
+        report.append(("WARN", "stretched_quads", stretched))
+    triangle_qualities = [_triangle_quality(vertices, face) for face in faces if len(face) == 3]
+    if triangle_qualities:
+        min_quality = min(triangle_qualities)
+        report.append(("INFO", "min_triangle_quality", round(float(min_quality), 4)))
+        bad_triangles = sum(1 for value in triangle_qualities if value < 0.08)
+        if bad_triangles:
+            report.append(("WARN", "skinny_triangles", bad_triangles))
+    return report
+
+
+def _quad_cage_report_has_errors(report: list[tuple[str, str, float | int | str]]) -> bool:
+    return any(severity == "ERROR" for severity, _key, _value in report)
+
+
+def _build_bvh_from_group(group: AutoConvexSourceGroup | AutoConvexBuildTask) -> BVHTree | None:
+    if not group.triangles:
+        return None
+    try:
+        return BVHTree.FromPolygons(group.points, group.triangles)
+    except Exception:
+        return None
+
+
+def _fit_quad_cage_by_raycast(
+    vertices: list[Vector],
+    faces: list[tuple[int, ...]],
+    group: AutoConvexSourceGroup | AutoConvexBuildTask,
+    offset: float,
+    max_scale_factor: float,
+) -> tuple[list[Vector], float]:
+    if not group.points:
+        return vertices, math.inf
+    center = _average_vectors(group.points)
+    bvh = _build_bvh_from_group(group)
+    radius = max((point - center).length for point in group.points) + max(float(offset), EPSILON)
+    max_distance = max(radius * 4.0, 1.0)
+    fitted: list[Vector] = []
+    for vertex in vertices:
+        direction = vertex - center
+        if direction.length <= EPSILON:
+            fitted.append(vertex.copy())
+            continue
+        direction.normalize()
+        support_distance = max((point - center).dot(direction) for point in group.points)
+        target_distance = support_distance + max(0.0, float(offset))
+        if bvh is not None:
+            hit, _normal, _index, _distance = bvh.ray_cast(center, direction, max_distance)
+            if hit is not None:
+                target_distance = max(target_distance, (hit - center).dot(direction) + max(0.0, float(offset)))
+        fitted.append(center + direction * max(target_distance, EPSILON))
+    return _expand_quad_cage_to_cover_points(fitted, faces, group.points, offset, max_scale_factor)
+
+
+def _taubin_smooth_quad_cage(
+    vertices: list[Vector],
+    faces: list[tuple[int, ...]],
+    iterations: int,
+    source_points: list[Vector],
+    offset: float,
+    max_scale_factor: float,
+) -> tuple[list[Vector], float]:
+    iterations = max(0, int(iterations))
+    if iterations <= 0:
+        return _expand_quad_cage_to_cover_points(vertices, faces, source_points, offset, max_scale_factor)
+    neighbors = _quad_cage_vertex_neighbors(faces, len(vertices))
+
+    def smooth_step(current: list[Vector], factor: float) -> list[Vector]:
+        result: list[Vector] = []
+        for index, vertex in enumerate(current):
+            linked = neighbors[index]
+            if not linked:
+                result.append(vertex.copy())
+                continue
+            average = _average_vectors([current[neighbor] for neighbor in linked])
+            result.append(vertex + (average - vertex) * factor)
+        return result
+
+    current = [vertex.copy() for vertex in vertices]
+    for _iteration in range(iterations):
+        current = smooth_step(current, 0.33)
+        current = smooth_step(current, -0.34)
+        current, _outside = _expand_quad_cage_to_cover_points(current, faces, source_points, offset, max_scale_factor)
+    return _expand_quad_cage_to_cover_points(current, faces, source_points, offset, max_scale_factor)
+
+
+def _planarize_quad_cage(
+    vertices: list[Vector],
+    faces: list[tuple[int, ...]],
+    strength: float,
+) -> list[Vector]:
+    strength = max(0.0, min(1.0, float(strength)))
+    if strength <= EPSILON:
+        return [vertex.copy() for vertex in vertices]
+    offsets = [Vector((0.0, 0.0, 0.0)) for _vertex in vertices]
+    counts = [0 for _vertex in vertices]
+    for face in faces:
+        if len(face) != 4:
+            continue
+        points = [vertices[index] for index in face]
+        center = _average_vectors(points)
+        normal = (points[1] - points[0]).cross(points[2] - points[0])
+        if normal.length <= EPSILON:
+            normal = (points[2] - points[0]).cross(points[3] - points[0])
+        if normal.length <= EPSILON:
+            continue
+        normal.normalize()
+        for vertex_index in face:
+            distance = normal.dot(vertices[vertex_index] - center)
+            offsets[vertex_index] -= normal * distance
+            counts[vertex_index] += 1
+    result: list[Vector] = []
+    for index, vertex in enumerate(vertices):
+        if counts[index] <= 0:
+            result.append(vertex.copy())
+        else:
+            result.append(vertex + offsets[index] * (strength / counts[index]))
+    return result
+
+
+def _build_auto_quad_cage_once(
+    group: AutoConvexSourceGroup | AutoConvexBuildTask,
+    settings: GOHToolSettings,
+    candidate: AutoQuadCageCandidate | None = None,
+) -> AutoQuadCageResult:
+    if not group.points:
+        raise ValueError("source mesh has no vertices")
+    if candidate is None:
+        target_faces = _auto_quad_face_budget_limit(int(settings.auto_convex_target_faces))
+        output_topology = str(settings.auto_convex_output_topology)
+        offset = max(0.0, float(settings.auto_convex_margin))
+        template = str(settings.auto_convex_template)
+        fit_mode = str(settings.auto_convex_fit_mode)
+        smooth_iterations = int(settings.auto_convex_smooth_iterations)
+        planarize_quads = bool(settings.auto_convex_planarize_quads)
+        planarize_strength = float(settings.auto_convex_planarize_strength)
+    else:
+        target_faces = _auto_quad_face_budget_limit(candidate.target_faces)
+        output_topology = str(candidate.output_topology)
+        offset = max(0.0, float(candidate.offset))
+        template = str(candidate.template)
+        fit_mode = str(candidate.fit_mode)
+        smooth_iterations = int(candidate.smooth_iterations)
+        planarize_quads = bool(candidate.planarize_quads)
+        planarize_strength = float(candidate.planarize_strength)
+    generation_budget = _auto_quad_generation_budget(target_faces, output_topology)
+    subdivision = _auto_convex_subdivision_for_budget(generation_budget)
+    source_face_count = len(group.triangles)
+    fit_points = _auto_quad_fit_points(group.points)
+    category = _auto_quad_part_category(group)
+    axes = _auto_quad_axes_for_group(group, category)
+    center, axes, size = _oriented_bounds_from_axes(group.points, axes, offset)
+
+    if _auto_quad_should_use_loft(template, category, size):
+        vertices, faces = _build_loft_quad_cage(group.points, axes, generation_budget, offset)
+        template = "LOFT"
+    else:
+        local_vertices, faces = _build_subdivided_cube_cage(subdivision)
+        template = _resolve_auto_quad_template(template, category, group, size)
+        shaped_vertices = _apply_quad_cage_template(local_vertices, template, size)
+        vertices = _align_template_to_obb(shaped_vertices, center, axes, size)
+    expansion_limit = 1.25 if template == "LOFT" else 3.0
+    vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, faces, fit_points, offset, expansion_limit)
+
+    if fit_mode == "RAY":
+        vertices, max_outside = _fit_quad_cage_by_raycast(vertices, faces, group, offset, expansion_limit)
+    if smooth_iterations > 0:
+        vertices, max_outside = _taubin_smooth_quad_cage(
+            vertices,
+            faces,
+            smooth_iterations,
+            fit_points,
+            offset,
+            expansion_limit,
+        )
+    if planarize_quads:
+        vertices = _planarize_quad_cage(vertices, faces, planarize_strength)
+        vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, faces, fit_points, offset, expansion_limit)
+
+    vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, faces, group.points, offset, expansion_limit)
+
+    faces = _apply_auto_quad_output_topology(faces, output_topology)
+    if _quad_cage_signed_volume(vertices, faces) < 0.0:
+        faces = [tuple(reversed(face)) for face in faces]
+    report = _validate_quad_cage(vertices, faces, target_faces)
+    if _quad_cage_report_has_errors(report):
+        local_vertices, fallback_faces = _build_subdivided_cube_cage(subdivision)
+        vertices = _align_template_to_obb(local_vertices, center, axes, size)
+        vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, fallback_faces, group.points, offset)
+        faces = _apply_auto_quad_output_topology(fallback_faces, output_topology)
+        if _quad_cage_signed_volume(vertices, faces) < 0.0:
+            faces = [tuple(reversed(face)) for face in faces]
+        report = _validate_quad_cage(vertices, faces, target_faces)
+        template = "BOX"
+        fit_mode = "OBB_FALLBACK"
+
+    if _quad_cage_report_has_errors(report):
+        errors = ", ".join(f"{key}={value}" for severity, key, value in report if severity == "ERROR")
+        raise ValueError(f"quad cage validation failed: {errors}")
+
+    actual_template = template.lower()
+    if actual_template == "auto":
+        longest = max(size.x, size.y, size.z)
+        shortest = max(min(size.x, size.y, size.z), EPSILON)
+        actual_template = "sphere" if longest / shortest < 1.35 else "rounded_box"
+    mode = f"quad_{actual_template.lower()}_{fit_mode.lower()}"
+    if str(output_topology).upper() == "TRIANGULATED":
+        mode = f"tri_{actual_template.lower()}_{fit_mode.lower()}"
+    return AutoQuadCageResult(
+        vertices=vertices,
+        faces=faces,
+        mode=mode,
+        source_face_count=source_face_count,
+        final_face_count=len(faces),
+        report=report,
+        max_outside=max(0.0, float(max_outside)),
+    )
+
+
+def _unique_auto_quad_values(values: Iterable[object]) -> list[object]:
+    result: list[object] = []
+    seen: set[object] = set()
+    for value in values:
+        key = value
+        if isinstance(value, float):
+            key = round(value, 6)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def _auto_quad_candidate_budgets(target_faces: int) -> list[int]:
+    target_faces = _auto_quad_face_budget_limit(target_faces)
+    values: list[int] = [target_faces]
+    values.extend(max(6, int(target_faces * scale)) for scale in (0.9, 0.75, 0.6, 0.45, 0.33))
+    values.extend([4096, 3072, 2048, 1536, 1024, 768, 512, 384, 294, 216, 150, 96, 54, 24, 12])
+    cleaned: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        budget = _auto_quad_face_budget_limit(value)
+        if budget > target_faces or budget in seen:
+            continue
+        seen.add(budget)
+        cleaned.append(budget)
+    return cleaned
+
+
+def _auto_quad_candidate_templates(settings: GOHToolSettings, category: str) -> list[str]:
+    selected = str(settings.auto_convex_template).upper()
+    if category in {"body", "turret"}:
+        defaults = ["AUTO", "LOFT", "ROUNDED_BOX", "BOX", "SPHERE"]
+    elif category == "gun":
+        defaults = ["AUTO", "ROUNDED_BOX", "BOX", "LOFT"]
+    else:
+        defaults = ["AUTO", "ROUNDED_BOX", "BOX", "SPHERE", "LOFT"]
+    return [str(value) for value in _unique_auto_quad_values([selected, *defaults])]
+
+
+def _auto_quad_candidate_offsets(group: AutoConvexSourceGroup | AutoConvexBuildTask, base_offset: float) -> list[float]:
+    min_corner, max_corner = _point_bounds(group.points)
+    diagonal = max((max_corner - min_corner).length, EPSILON)
+    step = max(diagonal * 0.0015, 0.0005)
+    values = [
+        max(0.0, base_offset),
+        max(0.0, base_offset * 0.5),
+        max(0.0, base_offset * 1.5),
+        max(0.0, base_offset + step),
+        max(0.0, base_offset + step * 2.0),
+    ]
+    return [float(value) for value in _unique_auto_quad_values(values)]
+
+
+def _auto_quad_optimizer_candidates(
+    group: AutoConvexSourceGroup | AutoConvexBuildTask,
+    settings: GOHToolSettings,
+    target_faces: int,
+) -> Iterable[AutoQuadCageCandidate]:
+    category = _auto_quad_part_category(group)
+    output_topology = str(settings.auto_convex_output_topology)
+    base = AutoQuadCageCandidate(
+        target_faces=_auto_quad_face_budget_limit(target_faces),
+        template=str(settings.auto_convex_template),
+        fit_mode=str(settings.auto_convex_fit_mode),
+        offset=max(0.0, float(settings.auto_convex_margin)),
+        smooth_iterations=max(0, int(settings.auto_convex_smooth_iterations)),
+        planarize_quads=bool(settings.auto_convex_planarize_quads),
+        planarize_strength=max(0.0, min(1.0, float(settings.auto_convex_planarize_strength))),
+        output_topology=output_topology,
+    )
+    yielded: set[tuple[object, ...]] = set()
+
+    def key(candidate: AutoQuadCageCandidate) -> tuple[object, ...]:
+        return (
+            candidate.target_faces,
+            candidate.template.upper(),
+            candidate.fit_mode.upper(),
+            round(candidate.offset, 6),
+            candidate.smooth_iterations,
+            candidate.planarize_quads,
+            round(candidate.planarize_strength, 4),
+            candidate.output_topology.upper(),
+        )
+
+    yielded.add(key(base))
+    yield base
+
+    budgets = _auto_quad_candidate_budgets(target_faces)
+    templates = _auto_quad_candidate_templates(settings, category)
+    fit_modes = [str(value) for value in _unique_auto_quad_values([str(settings.auto_convex_fit_mode), "RAY", "OBB"])]
+    offsets = _auto_quad_candidate_offsets(group, float(settings.auto_convex_margin))
+    smooth_values = [
+        int(value)
+        for value in _unique_auto_quad_values([
+            max(0, int(settings.auto_convex_smooth_iterations)),
+            0,
+            2,
+            3,
+            5,
+            8,
+        ])
+    ]
+    planarize_values = [bool(value) for value in _unique_auto_quad_values([bool(settings.auto_convex_planarize_quads), True, False])]
+    strength_values = [
+        float(value)
+        for value in _unique_auto_quad_values([
+            max(0.0, min(1.0, float(settings.auto_convex_planarize_strength))),
+            0.2,
+            0.35,
+            0.55,
+        ])
+    ]
+
+    seed_variants: list[AutoQuadCageCandidate] = []
+    seed_variants.extend(
+        AutoQuadCageCandidate(
+            target_faces=base.target_faces,
+            template=template,
+            fit_mode=base.fit_mode,
+            offset=base.offset,
+            smooth_iterations=base.smooth_iterations,
+            planarize_quads=base.planarize_quads,
+            planarize_strength=base.planarize_strength,
+            output_topology=base.output_topology,
+        )
+        for template in templates
+    )
+    seed_variants.extend(
+        AutoQuadCageCandidate(
+            target_faces=base.target_faces,
+            template=base.template,
+            fit_mode=fit_mode,
+            offset=base.offset,
+            smooth_iterations=base.smooth_iterations,
+            planarize_quads=base.planarize_quads,
+            planarize_strength=base.planarize_strength,
+            output_topology=base.output_topology,
+        )
+        for fit_mode in fit_modes
+    )
+    seed_variants.extend(
+        AutoQuadCageCandidate(
+            target_faces=budget,
+            template=base.template,
+            fit_mode=base.fit_mode,
+            offset=base.offset,
+            smooth_iterations=base.smooth_iterations,
+            planarize_quads=base.planarize_quads,
+            planarize_strength=base.planarize_strength,
+            output_topology=base.output_topology,
+        )
+        for budget in budgets[:5]
+    )
+    for candidate in seed_variants:
+        candidate_key = key(candidate)
+        if candidate_key in yielded:
+            continue
+        yielded.add(candidate_key)
+        yield candidate
+
+    for budget in budgets:
+        for template in templates:
+            for fit_mode in fit_modes:
+                for offset in offsets:
+                    for smooth_iterations in smooth_values:
+                        for planarize_quads in planarize_values:
+                            strengths = strength_values if planarize_quads else [base.planarize_strength]
+                            for strength in strengths:
+                                candidate = AutoQuadCageCandidate(
+                                    target_faces=budget,
+                                    template=template,
+                                    fit_mode=fit_mode,
+                                    offset=offset,
+                                    smooth_iterations=smooth_iterations,
+                                    planarize_quads=planarize_quads,
+                                    planarize_strength=strength,
+                                    output_topology=output_topology,
+                                )
+                                candidate_key = key(candidate)
+                                if candidate_key in yielded:
+                                    continue
+                                yielded.add(candidate_key)
+                                yield candidate
+
+
+def _auto_quad_report_number(
+    report: list[tuple[str, str, float | int | str]],
+    key: str,
+    default: float = 0.0,
+) -> float:
+    for _severity, report_key, value in report:
+        if report_key != key:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
+def _score_auto_quad_cage_result(
+    result: AutoQuadCageResult,
+    group: AutoConvexSourceGroup | AutoConvexBuildTask,
+    target_faces: int,
+) -> float:
+    if _quad_cage_report_has_errors(result.report):
+        return -math.inf
+    min_corner, max_corner = _point_bounds(group.points)
+    source_diagonal = max((max_corner - min_corner).length, EPSILON)
+    outside_penalty = min(0.25, max(0.0, float(result.max_outside)) / source_diagonal)
+    source_bounds_volume = max(_point_bounds_volume(group.points), EPSILON)
+    proxy_bounds_volume = max(_point_bounds_volume(result.vertices), EPSILON)
+    volume_bloat = min(25.0, max(0.0, proxy_bounds_volume / source_bounds_volume - 1.0))
+    face_ratio = min(1.0, max(0.0, float(result.final_face_count) / max(1.0, float(target_faces))))
+    stretched = _auto_quad_report_number(result.report, "stretched_quads")
+    non_planar = _auto_quad_report_number(result.report, "non_planar_quads")
+    skinny = _auto_quad_report_number(result.report, "skinny_triangles")
+    min_triangle_quality = _auto_quad_report_number(result.report, "min_triangle_quality", 1.0)
+    category = _auto_quad_part_category(group)
+
+    score = 1000.0
+    score -= outside_penalty * 100000.0
+    score -= volume_bloat * 90.0
+    score -= stretched * 0.25
+    score -= non_planar * 0.15
+    score -= skinny * 0.4
+    if min_triangle_quality < 0.2:
+        score -= (0.2 - min_triangle_quality) * 80.0
+    score += face_ratio * 12.0
+    score -= abs(0.82 - face_ratio) * 5.0
+    if "fallback" in result.mode:
+        score -= 45.0
+    if category in {"body", "turret"} and "loft" in result.mode:
+        score += 8.0
+    if category == "gun" and "rounded_box" in result.mode:
+        score += 4.0
+    return score
+
+
+def _build_auto_quad_cage(
+    group: AutoConvexSourceGroup | AutoConvexBuildTask,
+    settings: GOHToolSettings,
+) -> AutoQuadCageResult:
+    target_faces = _auto_quad_face_budget_limit(int(settings.auto_convex_target_faces))
+    requested_iterations = max(1, int(settings.auto_convex_optimize_iterations))
+    best_result: AutoQuadCageResult | None = None
+    best_score = -math.inf
+    first_error: Exception | None = None
+    tried = 0
+
+    for candidate in _auto_quad_optimizer_candidates(group, settings, target_faces):
+        if tried >= requested_iterations:
+            break
+        tried += 1
+        try:
+            result = _build_auto_quad_cage_once(group, settings, candidate)
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+        score = _score_auto_quad_cage_result(result, group, target_faces)
+        if score > best_score:
+            best_score = score
+            best_result = result
+
+    if best_result is None:
+        if first_error is not None:
+            raise first_error
+        raise ValueError("auto cage optimizer did not produce any valid candidate")
+
+    best_result.score = float(best_score)
+    best_result.iterations = int(tried)
+    best_result.report.append(("INFO", "optimizer_score", round(float(best_score), 4)))
+    best_result.report.append(("INFO", "optimizer_iterations", int(tried)))
+    best_result.report.append(("INFO", "output_topology", str(settings.auto_convex_output_topology)))
+    return best_result
+
+
+def _quad_cage_from_mesh_object(obj: bpy.types.Object) -> tuple[list[Vector], list[tuple[int, ...]]]:
+    if obj.type != "MESH" or obj.data is None:
+        return [], []
+    vertices = [vertex.co.copy() for vertex in obj.data.vertices]
+    faces: list[tuple[int, ...]] = []
+    for polygon in obj.data.polygons:
+        indices = tuple(int(index) for index in polygon.vertices)
+        if len(indices) == 4:
+            faces.append((indices[0], indices[1], indices[2], indices[3]))
+        else:
+            faces.append(tuple(indices))
+    return vertices, faces
+
+
+def _finish_auto_convex_volume_operator(
+    operator: Operator,
+    context: bpy.types.Context,
+    created: list[bpy.types.Object],
+    skipped: list[str],
+) -> set[str]:
+    if not created:
+        message = "No auto collision cage volumes were created."
+        if skipped:
+            message += f" First skipped object: {skipped[0]}"
+        operator.report({"WARNING"}, message)
+        return {"CANCELLED"}
+
+    bpy.ops.object.select_all(action="DESELECT")
+    for helper in created:
+        helper.select_set(True)
+    context.view_layer.objects.active = created[-1]
+    if skipped:
+        operator.report({"WARNING"}, f"Created {len(created)} auto collision cage volume(s); skipped {len(skipped)}.")
+    else:
+        operator.report({"INFO"}, f"Created {len(created)} auto collision cage volume(s).")
+    return {"FINISHED"}
+
+
+def _unique_auto_convex_stem(base_name: str, used_names: dict[str, int]) -> str:
+    safe_name = sanitized_file_stem(base_name) or "auto_convex"
+    key = safe_name.lower()
+    count = used_names.get(key, 0)
+    used_names[key] = count + 1
+    if count == 0:
+        return safe_name
+    return f"{safe_name}_{count + 1:02d}"
+
+
+def _unique_blender_name(existing, base_name: str) -> str:
+    safe_name = base_name.strip() or "AutoConvex"
+    if existing.get(safe_name) is None:
+        return safe_name
+    index = 1
+    while True:
+        candidate = f"{safe_name}.{index:03d}"
+        if existing.get(candidate) is None:
+            return candidate
+        index += 1
+
+
+def _clear_existing_auto_convex_helpers(scene: bpy.types.Scene, source_objects: list[bpy.types.Object]) -> int:
+    source_names = {obj.name for obj in source_objects}
+    removed = 0
+    for obj in list(scene.objects):
+        if not obj.get("goh_auto_convex_source"):
+            continue
+        if str(obj.get("goh_auto_convex_source")) not in source_names:
+            continue
+        bpy.data.objects.remove(obj, do_unlink=True)
+        removed += 1
+    return removed
+
+
+def _create_auto_convex_volume_helper(
+    context: bpy.types.Context,
+    source: bpy.types.Object,
+    result: AutoQuadCageResult,
+    target_faces: int,
+    margin: float,
+    smooth_display: bool,
+    volume_name: str | None = None,
+) -> bpy.types.Object:
+    center = _average_vectors(result.vertices)
+    bone_name = str(source.get("goh_bone_name") or source.name).strip()
+    volume_name = volume_name or sanitized_file_stem(bone_name) or sanitized_file_stem(source.name) or "auto_convex"
+    helper_name = _unique_blender_name(bpy.data.objects, f"{volume_name}_vol")
+    mesh_name = _unique_blender_name(bpy.data.meshes, f"{helper_name}_mesh")
+    local_vertices = [tuple(vertex - center) for vertex in result.vertices]
+
+    mesh = bpy.data.meshes.new(mesh_name)
+    mesh.from_pydata(local_vertices, [], result.faces)
+    mesh.update(calc_edges=True)
+    for polygon in mesh.polygons:
+        polygon.use_smooth = bool(smooth_display)
+
+    helper = bpy.data.objects.new(helper_name, mesh)
+    helper.matrix_world = Matrix.Translation(center)
+    helper.display_type = "WIRE"
+    helper.show_in_front = True
+    helper["goh_is_volume"] = True
+    helper["goh_volume_name"] = volume_name
+    helper["goh_volume_bone"] = bone_name
+    helper["goh_volume_kind"] = "polyhedron"
+    helper["goh_auto_quad_cage"] = True
+    helper["goh_auto_convex_source"] = source.name
+    helper["goh_auto_convex_mode"] = result.mode
+    helper["goh_auto_convex_target_faces"] = int(target_faces)
+    helper["goh_auto_convex_margin"] = float(margin)
+    helper["goh_auto_convex_source_faces"] = int(result.source_face_count)
+    helper["goh_auto_convex_faces"] = int(result.final_face_count)
+    helper["goh_auto_convex_max_outside"] = float(max(0.0, result.max_outside))
+    helper["goh_auto_convex_score"] = float(result.score)
+    helper["goh_auto_convex_iterations"] = int(result.iterations)
+    helper["goh_auto_quad_validation"] = "; ".join(
+        f"{severity}:{key}={value}" for severity, key, value in result.report
+    )
+    _link_to_helper_collection(context.scene, helper, "GOH_VOLUMES")
+    return helper
+
+
+class OBJECT_OT_goh_create_auto_convex_volume(Operator):
+    bl_idname = "object.goh_create_auto_convex_volume"
+    bl_label = "Auto Collision Cage Volume"
+    bl_description = "Create closed triangle/quad GOH polyhedron volume helpers from the selected meshes"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        for obj in context.selected_objects:
+            if obj.type == "MESH" and not _is_tool_helper_object(obj):
+                return True
+            if any(child.type == "MESH" and not _is_tool_helper_object(child) for child in _iter_object_tree(obj)):
+                return True
+        return False
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+
+        created: list[bpy.types.Object] = []
+        skipped: list[str] = []
+        used_volume_names: dict[str, int] = {}
+        source_objects = _auto_convex_source_objects(
+            context,
+            str(settings.auto_convex_source_scope) == "HIERARCHY",
+        )
+        if bool(settings.auto_convex_clear_existing):
+            _clear_existing_auto_convex_helpers(context.scene, source_objects)
+
+        max_hulls = max(1, int(settings.auto_convex_max_hulls))
+        source_groups: list[AutoConvexSourceGroup] = []
+        for obj in source_objects:
+            try:
+                groups = _mesh_world_point_groups(
+                    context,
+                    obj,
+                    bool(settings.auto_convex_use_evaluated),
+                    bool(settings.auto_convex_split_loose_parts),
+                    int(settings.auto_convex_min_part_vertices),
+                )
+                groups = sorted(groups, key=lambda group: _point_bounds_volume(group.points), reverse=True)
+                if not groups:
+                    raise ValueError("source mesh has no usable vertices")
+            except Exception as exc:
+                skipped.append(f"{obj.name}: {exc}")
+                continue
+            source_groups.extend(groups)
+
+        tasks, dropped_groups = _build_auto_quad_cage_task_queue(
+            source_groups,
+            max_hulls,
+        )
+        if dropped_groups:
+            skipped.append(f"{dropped_groups} small source group(s): max hull limit reached")
+
+        for task_index, task in enumerate(tasks, start=1):
+            try:
+                result = _build_auto_quad_cage(task, settings)
+            except Exception as exc:
+                skipped.append(f"{task.source.name}: {exc}")
+                continue
+            bone_name = str(task.source.get("goh_bone_name") or task.source.name).strip()
+            base_stem = sanitized_file_stem(bone_name) or sanitized_file_stem(task.source.name) or "auto_convex"
+            suffix = task.label or f"hull{task_index:02d}"
+            proposed_name = f"{base_stem}_{suffix}" if suffix else base_stem
+            volume_name = _unique_auto_convex_stem(proposed_name, used_volume_names)
+            helper = _create_auto_convex_volume_helper(
+                context,
+                task.source,
+                result,
+                int(settings.auto_convex_target_faces),
+                float(settings.auto_convex_margin),
+                bool(settings.auto_convex_smooth_display),
+                volume_name,
+            )
+            helper["goh_auto_convex_group"] = task.label or task.source.name
+            helper["goh_auto_convex_group_vertices"] = int(task.vertex_count)
+            helper["goh_auto_convex_output_topology"] = str(settings.auto_convex_output_topology)
+            created.append(helper)
+
+        return _finish_auto_convex_volume_operator(self, context, created, skipped)
 
 
 class OBJECT_OT_goh_create_volume_from_bounds(Operator):
@@ -7668,6 +9512,28 @@ class VIEW3D_PT_goh_tools(Panel):
         collision_box.label(text="Collision Helpers")
         collision_box.prop(settings, "helper_volume_kind")
         collision_box.operator(OBJECT_OT_goh_create_volume_from_bounds.bl_idname, text="Volume From Bounds")
+        collision_box.separator()
+        collision_box.prop(settings, "auto_convex_template")
+        collision_box.prop(settings, "auto_convex_fit_mode")
+        collision_box.prop(settings, "auto_convex_source_scope")
+        collision_box.prop(settings, "auto_convex_output_topology")
+        collision_box.prop(settings, "auto_convex_target_faces")
+        collision_box.prop(settings, "auto_convex_optimize_iterations", slider=True)
+        collision_box.prop(settings, "auto_convex_max_hulls")
+        collision_box.prop(settings, "auto_convex_margin")
+        row = collision_box.row(align=True)
+        row.prop(settings, "auto_convex_use_evaluated")
+        row.prop(settings, "auto_convex_smooth_display")
+        collision_box.prop(settings, "auto_convex_clear_existing")
+        row = collision_box.row(align=True)
+        row.prop(settings, "auto_convex_split_loose_parts")
+        collision_box.prop(settings, "auto_convex_min_part_vertices")
+        row = collision_box.row(align=True)
+        row.prop(settings, "auto_convex_smooth_iterations")
+        row.prop(settings, "auto_convex_planarize_quads")
+        if settings.auto_convex_planarize_quads:
+            collision_box.prop(settings, "auto_convex_planarize_strength")
+        collision_box.operator(OBJECT_OT_goh_create_auto_convex_volume.bl_idname, text="Auto Collision Cage Volume")
 
         physics_box = layout.box()
         physics_box.label(text="Physics Bake Presets")
@@ -7799,6 +9665,7 @@ CLASSES = (
     SCENE_OT_goh_autofill_materials,
     SCENE_OT_goh_validate_scene,
     OBJECT_OT_goh_assign_lod_files,
+    OBJECT_OT_goh_create_auto_convex_volume,
     OBJECT_OT_goh_create_volume_from_bounds,
     OBJECT_OT_goh_create_recoil_action,
     OBJECT_OT_goh_assign_physics_link,
