@@ -6,7 +6,7 @@
 
 It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds Max GOH workflows while keeping the authoring experience Blender-native.
 
-Current release: `1.1.0`.
+Current release: `1.2.0`.
 
 ## Highlights
 
@@ -22,6 +22,7 @@ Current release: `1.1.0`.
 - Write `GOH_Export_Manifest.json` with file hashes and export counts
 - Auto-fill GOH material texture fields from Blender image texture names
 - Generate LOD file lists, bounds-based volume helpers, baked recoil actions, and directional fire clips
+- Generate automatic topology-aware collision cage helpers from selected meshes using the built-in reward-guided Cage Fitter, including legal triangle/quad output, loft profile mode for hulls and turrets, configurable candidate scoring, and per-helper budgets up to 5000 faces
 - Bake linked recoil, impact shake, and armor ripple mesh-animation effects
 - `Antenna Whip` now bakes rooted antenna mesh deformation with a minimum-energy cubic beam curve, source-axis front-back sway, smooth linear shape-key playback, and natural long-tail recoil follow-through
 - Imported GOH `basis` mirror transforms can now be deferred so Blender, SOEdit, and in-game animation playback stay aligned while export still writes the required GOH coordinate flip and ANM pitch parity
@@ -91,6 +92,7 @@ It checks common authoring mistakes:
 - invalid `goh_volume_kind`
 - missing cylinder primitive axis metadata
 - missing volume bone targets
+- invalid generated collision cage topology, including ngons, open edges, non-manifold edges, Euler mismatches, degenerate faces, skinny triangle warnings, and per-helper face-budget overflow
 - invalid `Obstacle` / `Area` shape helper metadata
 - overlapping multi-range `goh_sequence_ranges`
 - materials without GOH texture fields
@@ -109,6 +111,8 @@ It reports warnings for issues that may still export but should be inspected bef
   writes `goh_lod_files` and optional `goh_lod_off` for selected visual meshes
 - `Volume From Bounds`
   creates GOH volume helper objects from selected mesh bounding boxes
+- `Auto Collision Cage Volume`
+  creates closed, watertight polyhedron helpers from selected meshes. Triangles and quads are legal, ngons are rejected, and the per-helper face budget can be set up to `5000`. The generator uses template cages (`Box`, `Rounded Box`, `Quad Sphere`, `Loft Cage`, or `Auto`), OBB or ray-projection fitting, offset inflation, Taubin smoothing, quad planarization, topology validation, and a deterministic reward-guided optimizer. `Auto` uses lengthwise loft profiles for large body and turret parts so they can taper and follow sloped vehicle silhouettes.
 - `Create Recoil Action`
   generates a baked local-axis recoil action and optional `goh_sequence_*` metadata
 - `Assign Physics Link`
@@ -209,7 +213,7 @@ Compatibility rules:
 3. Select the zip file.
 4. Enable `GOH GEM Exporter`
 
-The official release asset is `blender_goh_gem_exporter-1.1.0.zip`.
+The official release asset is `blender_goh_gem_exporter-1.2.0.zip`.
 For a cleaner release-ready package, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Recommended Round-Trip Export Settings
@@ -244,11 +248,11 @@ python -X utf8 tests\smoke_test.py
 - [Installation Guide](docs/INSTALL.md)
 - [中文说明](README.zh-CN.md)
 - [Quick Start](docs/QUICK_START.md)
+- [Detailed Plugin Guide - English](docs/PLUGIN_GUIDE_EN.md)
+- [Detailed Plugin Guide - Chinese](docs/PLUGIN_GUIDE_ZH-CN.md)
 - [Physics Bake Workflow](docs/PHYSICS_BAKE.md)
 - [Official Max Plugin Compatibility Notes](docs/OFFICIAL_MAX_PLUGIN_NOTES.md)
-- [v1.1.0 Release Notes](docs/RELEASE_NOTES_v1.1.0.md)
-- [v1.0.1 Release Notes](docs/RELEASE_NOTES_v1.0.1.md)
-- [v1.0.0 Release Notes](docs/RELEASE_NOTES_v1.0.0.md)
+- [v1.2.0 Release Notes](docs/RELEASE_NOTES_v1.2.0.md)
 
 ## License
 

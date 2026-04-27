@@ -1,4 +1,4 @@
-# Blender GOH GEM Exporter
+﻿# Blender GOH GEM Exporter
 
 [English](README.md) | [中文说明](README.zh-CN.md)
 
@@ -6,7 +6,7 @@
 
 它的目标不是简单复刻 3ds Max MultiScript，而是在 Blender 里提供更现代、更结构化的 GOH 模型、碰撞、材质、动画和物理烘焙工作流。
 
-当前发布版本：`1.1.0`。
+当前发布版本：`1.2.0`。
 
 ## 主要功能
 
@@ -21,15 +21,16 @@
 - 提供 GOH 预设、Basis 面板、Transform block、Weapon helper、Texture helper、材质自动识别和场景校验
 - 导出时生成 `GOH_Export_Manifest.json`，记录文件哈希、数量统计和导出设置
 - 支持 LOD 文件列表、包围盒碰撞辅助体、后坐力动作、方向射击动画、一键物理联结烘焙
+- 支持从选中模型自动生成闭合、流形、全四边形碰撞 cage，使用内置 topology-first Quad Cage Fitter；车身和炮塔类大部件会自动使用沿长度采样的 Loft Cage
 - 导入 GOH `basis` 镜像矩阵时可启用延迟翻转，让 Blender、SOEdit 和游戏内动画方向保持一致，导出时再写回 GOH 需要的坐标翻转和 ANM 俯仰方向补偿
 
 ## 推荐安装
 
 正式发布包里有两个 zip：
 
-- `blender_goh_gem_exporter-1.1.0.zip`
+- `blender_goh_gem_exporter-1.2.0.zip`
   Blender 插件安装包，推荐在 Blender 里直接安装这个文件。
-- `blender_goh_gem_exporter-1.1.0-full.zip`
+- `blender_goh_gem_exporter-1.2.0-full.zip`
   完整源码、文档、测试和示例素材快照，适合 GitHub 发布页或二次开发。
 
 安装步骤：
@@ -37,7 +38,7 @@
 1. 打开 Blender。
 2. 进入 `Edit > Preferences > Add-ons`。
 3. 点击 `Install...`。
-4. 选择 `blender_goh_gem_exporter-1.1.0.zip`。
+4. 选择 `blender_goh_gem_exporter-1.2.0.zip`。
 5. 启用 `GOH GEM Exporter`。
 
 ## Blender 面板
@@ -171,6 +172,13 @@ goh_sequence_file = fire
 - 旧 Max 文本属性作为兼容 fallback。
 - 旧 `ID=...` 可以继续驱动导出名称。
 
+## 详细文档
+
+- [英文详细插件手册](docs/PLUGIN_GUIDE_EN.md)
+- [中文详细插件手册](docs/PLUGIN_GUIDE_ZH-CN.md)
+- [快速开始](docs/QUICK_START.md)
+- [物理烘焙说明](docs/PHYSICS_BAKE.md)
+
 ## 测试
 
 仓库包含两层回归测试：
@@ -188,3 +196,6 @@ python -X utf8 tests\smoke_test.py
 ## 许可
 
 本项目使用 [MIT License](LICENSE)。
+
+
+
