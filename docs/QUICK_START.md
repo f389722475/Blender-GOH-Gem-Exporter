@@ -9,6 +9,7 @@
 ## 2. Add Helpers
 
 - Use `Collision Volume` presets for 3D collision helpers
+- Use `GOH Tools > Collision Helpers > Auto Collision Cage Volume` to generate closed triangle/quad polyhedron helpers from selected meshes; pick `Box`, `Rounded Box`, `Quad Sphere`, `Loft Cage`, or `Auto`, then choose `OBB` or `Ray Projection` fitting. `Auto` is usually best for vehicles: it keeps gun barrels rounded and switches large hull/turret parts to lengthwise loft profiles. Use `Face Budget` up to `5000` for detailed helpers and raise `Optimize Iterations` when you want deeper candidate search.
 - Use `Obstacle (2D)` and `Area (2D)` presets for 2D helper shapes
 - Use `Dummy / Placer` and `Effect / Marker` presets for crew points, pivots, emitters, and FX markers
 
