@@ -36,7 +36,7 @@ Use an official model as a reference whenever possible.
 4. Keep these import options for normal editing:
    - `Axis Conversion = None / GOH Native`
    - `Scale Factor = 20`
-   - `Defer Basis Flip = On`
+   - `Defer Basis Flip = Off`
    - `Import Volumes = On`
    - `LOD0 Only = On` for quick study
 5. Study the hierarchy in the Outliner.
@@ -539,7 +539,7 @@ Use:
 
 ### Exported animation direction is mirrored
 
-For imported GOH-native models, keep `Defer Basis Flip = On`. This keeps Blender editing direction aligned with SOEdit/game export conversion.
+For imported GOH-native models, keep `Defer Basis Flip = Off` when you need Blender to match SOEdit/game helper placement and child orientation exactly. Turn it on only for older non-mirrored editing scenes; ANM import and export both apply the matching handness compensation in that mode.
 
 ## 16. Practical Checklist
 
@@ -557,4 +557,3 @@ Before exporting a vehicle, check:
 - Materials have GOH texture fields.
 - Basis helper is synced.
 - Validation report has no errors.
-

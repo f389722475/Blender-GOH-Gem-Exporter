@@ -1217,6 +1217,7 @@ def main() -> None:
             import_volumes=True,
             import_shapes=True,
             import_lod0_only=True,
+            defer_basis_flip=True,
         )
         if "FINISHED" not in import_result:
             raise RuntimeError(f"Model import failed: {import_result}")
@@ -1230,6 +1231,10 @@ def main() -> None:
         imported_basis = next((obj for obj in imported_objects if obj.get("goh_bone_name") == "basis" and obj.type == "EMPTY"), None)
         if imported_body is None or len(imported_body.data.vertices) == 0:
             raise RuntimeError("Model import did not rebuild the body visual mesh.")
+        if not imported_body.data.get("goh_imported_custom_normals"):
+            raise RuntimeError("Model import did not apply EPLY custom split normals to the body mesh.")
+        if imported_body.data.get("goh_imported_custom_normal_loops") != len(imported_body.data.loops):
+            raise RuntimeError("Model import custom normal loop count does not match Blender mesh loops.")
         if imported_basis is None or not imported_basis.get("goh_deferred_basis_flip"):
             raise RuntimeError("Model import did not defer the mirrored GOH basis for Blender editing.")
         if imported_basis.matrix_world.to_3x3().determinant() < 0.0:
@@ -1408,6 +1413,7 @@ def main() -> None:
         )
         if "FINISHED" not in deferred_animation_result:
             raise RuntimeError(f"Deferred basis animation export failed: {deferred_animation_result}")
+        deferred_animation_path = None
         deferred_delta_y = None
         deferred_pitch_marker = None
         for animation_path in deferred_animation_dir.glob("*.anm"):
@@ -1416,15 +1422,42 @@ def main() -> None:
                 continue
             delta = candidate.frames[-1]["body"].matrix[3][1] - candidate.frames[0]["body"].matrix[3][1]
             if abs(delta) > 1.0:
+                deferred_animation_path = animation_path
                 deferred_delta_y = delta
                 deferred_pitch_marker = candidate.frames[-1]["body"].matrix[0][2]
                 break
+        if deferred_animation_path is None:
+            raise RuntimeError("Deferred basis animation export did not produce a reusable ANM probe.")
         if deferred_delta_y is None:
             raise RuntimeError("Deferred basis animation export did not write the probe motion.")
         if deferred_delta_y <= 0.0:
             raise RuntimeError("Deferred basis animation was not converted into GOH export space.")
         if deferred_pitch_marker is None or deferred_pitch_marker >= -0.05:
             raise RuntimeError("Deferred basis animation did not invert the exported pitch delta for GOH playback.")
+        basis_probe_child.animation_data_clear()
+        basis_probe_child.location = Vector((1.0, 2.0, 3.0))
+        basis_probe_child.rotation_euler = (0.0, 0.0, 0.0)
+        bpy.ops.object.select_all(action="DESELECT")
+        basis_probe_child.select_set(True)
+        bpy.context.view_layer.objects.active = basis_probe_child
+        deferred_import_result = bpy.ops.import_scene.goh_anm(
+            filepath=str(deferred_animation_path),
+            axis_mode="NONE",
+            frame_start=70,
+        )
+        if "FINISHED" not in deferred_import_result:
+            raise RuntimeError(f"Deferred basis animation re-import failed: {deferred_import_result}")
+        scene.frame_set(70)
+        bpy.context.view_layer.update()
+        if abs(basis_probe_child.location.y - 2.0) > 0.05:
+            raise RuntimeError("Deferred basis animation import changed the rest pose unexpectedly.")
+        scene.frame_set(71)
+        bpy.context.view_layer.update()
+        if abs(basis_probe_child.location.y - 1.5) > 0.05:
+            raise RuntimeError("Deferred basis animation import did not restore Blender-visible translation direction.")
+        imported_pitch_marker = basis_probe_child.rotation_quaternion.to_matrix()[0][2]
+        if imported_pitch_marker <= 0.05:
+            raise RuntimeError("Deferred basis animation import did not restore Blender-visible pitch direction.")
         basis_probe_child.animation_data_clear()
         if "goh_deferred_basis_flip" in basis_probe_basis:
             del basis_probe_basis["goh_deferred_basis_flip"]
