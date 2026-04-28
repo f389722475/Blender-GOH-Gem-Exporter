@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.0 - 2026-04-28
+
+### Changed
+
+- Split the monolithic Blender addon module into focused export, import, collision, physics, preset, and helper modules while preserving the existing Blender entry points.
+- Kept the topology-aware collision cage generator and physics bake behavior covered by smoke, Blender runtime, issue #3, and `tests/2.blend` regression tests.
+- Updated release packaging so the addon zip includes the full modular package, with the two internal algorithm modules protected in the local release build.
+
 ## 1.2.1 - 2026-04-28
 
 ### Added

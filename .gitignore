@@ -7,6 +7,7 @@ __pycache__/
 .mypy_cache/
 
 runtime_test_output/
+refactor_audit/
 dist/
 release/
 .tools/
