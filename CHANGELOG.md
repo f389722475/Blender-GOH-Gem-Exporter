@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.1 - 2026-04-28
+
+### Fixed
+
+- Fixed GEM material import preview mapping so diffuse, normal, and specular textures drive Blender materials without inventing unsupported AO or metallic channels.
+- Fixed ANM import handedness handling for GOH-native mirrored basis chains by preserving the imported MDL rest orientation while applying animation translation deltas.
+
+### Verified
+
+- Added and ran the M60A1 import/animation regression against the WTREBUILD sample vehicle.
+- Added and ran the 12-sample random vehicle import regression for 10 iterations.
+
 ## 1.3.0 - 2026-04-28
 
 ### Changed

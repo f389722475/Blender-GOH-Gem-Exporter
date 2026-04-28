@@ -6,7 +6,7 @@
 
 It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds Max GOH workflows while keeping the authoring experience Blender-native.
 
-Current release: `1.3.0`.
+Current release: `1.3.1`.
 
 ## Highlights
 
@@ -27,6 +27,7 @@ Current release: `1.3.0`.
 - `Antenna Whip` now bakes rooted antenna mesh deformation with a minimum-energy cubic beam curve, source-axis front-back sway, smooth linear shape-key playback, and natural long-tail recoil follow-through
 - GOH model import now preserves source smoothing by applying EPLY normals as Blender custom split normals, and keeps default imported `basis` transforms faithful to SOEdit/game space
 - Imported GOH `basis` mirror transforms can still be deferred for legacy non-mirrored editing; ANM import and export now share the same handness compensation so Blender, SOEdit, and in-game playback stay aligned
+- GOH material import follows the GEM texture model: diffuse color, normal map, and specular map are mapped directly, with metallic forced off and roughness derived conservatively for Blender preview parity
 
 ## Repository Layout
 
@@ -214,7 +215,7 @@ Compatibility rules:
 3. Select the zip file.
 4. Enable `GOH GEM Exporter`
 
-The official release asset is `blender_goh_gem_exporter-1.3.0.zip`.
+The official release asset is `blender_goh_gem_exporter-1.3.1.zip`.
 For a cleaner release-ready package, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Recommended Round-Trip Export Settings
@@ -253,6 +254,7 @@ python -X utf8 tests\smoke_test.py
 - [Detailed Plugin Guide - Chinese](docs/PLUGIN_GUIDE_ZH-CN.md)
 - [Physics Bake Workflow](docs/PHYSICS_BAKE.md)
 - [Official Max Plugin Compatibility Notes](docs/OFFICIAL_MAX_PLUGIN_NOTES.md)
+- [v1.3.1 Release Notes](docs/RELEASE_NOTES_v1.3.1.md)
 - [v1.3.0 Release Notes](docs/RELEASE_NOTES_v1.3.0.md)
 - [v1.2.1 Release Notes](docs/RELEASE_NOTES_v1.2.1.md)
 
