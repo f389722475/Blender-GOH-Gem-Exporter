@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 import sys
 
 import bpy
+from mathutils import Matrix
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +51,51 @@ def _has_link(node, names: tuple[str, ...]) -> bool:
 
 def _determinant(obj: bpy.types.Object) -> float:
     return float(obj.matrix_local.to_3x3().determinant())
+
+
+def _stored_rest_local_matrix(obj: bpy.types.Object | None) -> Matrix | None:
+    if obj is None:
+        return None
+    values = obj.get("goh_rest_matrix_local")
+    if values is None:
+        return None
+    floats = [float(value) for value in values]
+    if len(floats) != 16:
+        return None
+    return Matrix(
+        (
+            floats[0:4],
+            floats[4:8],
+            floats[8:12],
+            floats[12:16],
+        )
+    )
+
+
+def _loc_rot_matrix(matrix: Matrix) -> Matrix:
+    loc, rot, _scale = matrix.decompose()
+    return Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+
+
+def _object_animation_delta_euler(obj: bpy.types.Object) -> tuple[float, float, float]:
+    rest_matrix = _stored_rest_local_matrix(obj)
+    if rest_matrix is None:
+        raise RuntimeError(f"{obj.name} is missing stored GOH rest matrix.")
+    delta = _loc_rot_matrix(rest_matrix).inverted_safe() @ _loc_rot_matrix(obj.matrix_local)
+    euler = delta.to_euler("XYZ")
+    return tuple(math.degrees(value) for value in (euler.x, euler.y, euler.z))
+
+
+def _assert_fire_body_pitch_matches_game_direction() -> None:
+    body = bpy.data.objects.get("body")
+    if body is None:
+        raise RuntimeError("m60a1 import did not create body object.")
+    bpy.context.scene.frame_set(12)
+    _pitch_x, pitch_y, _pitch_z = _object_animation_delta_euler(body)
+    if pitch_y >= -0.1:
+        raise RuntimeError(
+            f"fire.anm frame 12 body pitch is {pitch_y:.3f} degrees; expected negative pitch for SOEdit/game direction."
+        )
 
 
 def _assert_materials_look_goh_like() -> None:
@@ -117,6 +164,8 @@ def _assert_animation_does_not_break_mirrored_basis() -> None:
         )
         if "FINISHED" not in result:
             raise RuntimeError(f"Animation import failed for {anm_name}: {result}")
+        if anm_name == "fire.anm":
+            _assert_fire_body_pitch_matches_game_direction()
         bpy.context.scene.frame_set(1)
         for name, baseline in baseline_positions.items():
             obj = bpy.data.objects.get(name)

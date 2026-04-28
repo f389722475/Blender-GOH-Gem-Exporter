@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.2 - 2026-04-29
+
+### Fixed
+
+- Fixed ANM import for the default source-faithful mirrored `basis` path so child rotations are corrected when the parent basis remains mirrored in Blender.
+- Added direct frame-12 pitch regressions for M60A1 `fire.anm` and a reusable ANM pitch probe for saved `.blend` scenes.
+
+### Verified
+
+- Reimported `fire.anm` into `tests/m60a1.blend`: frame 12 `body` pitch is `-1.111113`.
+- Reimported Conqueror `fire_front.anm` into `tests/conquermk2.blend`: frame 12 `body` pitch is `-1.716000`.
+- Ran Blender M60A1 import/material/animation regression, Blender runtime regression, Python smoke tests, and 12-sample random vehicle import regression for 5 iterations.
+
 ## 1.3.1 - 2026-04-28
 
 ### Fixed

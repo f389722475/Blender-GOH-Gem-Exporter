@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import json
+import os
 import random
 import sys
 import traceback
@@ -28,7 +29,7 @@ MOD_DIRS = (
     "WTREBUILD",
 )
 SAMPLE_COUNT = 12
-ITERATIONS = 10
+ITERATIONS = max(1, int(os.environ.get("GOH_REGRESSION_ITERATIONS", "10")))
 SEED = 13003121
 REPORT_PATH = ROOT / "runtime_test_output" / "self_learning_import_regression.json"
 

@@ -447,7 +447,7 @@ class GOHAnimationImporter:
             preserved = rest_matrix.copy()
             preserved.translation = local_matrix.translation
             return preserved
-        correction = self._deferred_basis_animation_correction_matrix(obj)
+        correction = self._mirrored_basis_animation_correction_matrix(obj)
         if correction is None:
             return local_matrix
         return self._convert_deferred_basis_animation_delta(rest_matrix, local_matrix, correction)
@@ -483,6 +483,15 @@ class GOHAnimationImporter:
             return None
         return self._basis_rotation_matrix().to_4x4()
 
+    def _mirrored_basis_animation_correction_matrix(self, obj: bpy.types.Object) -> Matrix | None:
+        correction = self._deferred_basis_animation_correction_matrix(obj)
+        if correction is not None:
+            return correction
+        basis = self._basis_helper_ancestor(obj)
+        if basis is None or not self._basis_helper_displays_mirrored_space(basis):
+            return None
+        return self._basis_rotation_matrix().to_4x4()
+
     def _basis_helper_ancestor(self, obj: bpy.types.Object) -> bpy.types.Object | None:
         parent = obj.parent
         while parent is not None:
@@ -497,6 +506,11 @@ class GOHAnimationImporter:
         if obj.get("goh_basis_helper"):
             return True
         return obj.type == "EMPTY" and obj.name.lower() == GOH_BASIS_HELPER_NAME.lower()
+
+    def _basis_helper_displays_mirrored_space(self, obj: bpy.types.Object) -> bool:
+        if obj.get("goh_deferred_basis_flip"):
+            return False
+        return self._matrix_is_mirrored(obj.matrix_world)
 
     def _stored_rest_local_matrix(self, obj: bpy.types.Object | None) -> Matrix | None:
         if obj is None:
