@@ -76,7 +76,7 @@ from .presets import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
-GOH_ADDON_VERSION = "1.3.0"
+GOH_ADDON_VERSION = "1.3.1"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),

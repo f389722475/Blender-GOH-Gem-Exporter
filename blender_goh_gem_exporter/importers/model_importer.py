@@ -448,32 +448,129 @@ class GOHModelImporter:
             material["goh_material_kind"] = "bump"
         elif material_def.shader:
             material["goh_material_kind"] = material_def.shader
+        if material_def.specular_texture:
+            material["goh_specular_role"] = self._specular_texture_role(material_def)
+        self._configure_goh_principled_defaults(material, material_def)
         if self.operator.load_textures:
-            self._attach_diffuse_texture(material, material_def)
+            self._attach_goh_material_textures(material, material_def)
         self.material_cache[material_file] = material
         return material
 
-    def _attach_diffuse_texture(self, material: bpy.types.Material, material_def: MaterialDef) -> None:
-        texture_name = material_def.diffuse_texture or material_def.simple_texture
-        if not texture_name:
-            return
-        image_path = self._resolve_texture_path(texture_name)
-        if image_path is None:
-            return
-        try:
-            image = bpy.data.images.load(str(image_path), check_existing=True)
-        except RuntimeError:
-            self.warnings.append(f'Texture "{texture_name}" could not be loaded by Blender.')
-            return
+    def _specular_texture_role(self, material_def: MaterialDef) -> str:
+        return "specular"
+
+    def _configure_goh_principled_defaults(self, material: bpy.types.Material, material_def: MaterialDef) -> None:
         material.use_nodes = True
         node_tree = material.node_tree
         if node_tree is None:
             return
+        principled = self._principled_node(node_tree)
+        if principled is None:
+            return
+        self._set_node_input_default(principled, ("Metallic",), 0.0)
+        self._set_node_input_default(principled, ("Roughness",), 0.82 if material_def.shader == "bump" else 0.68)
+        self._set_node_input_default(principled, ("Specular IOR Level", "Specular"), 0.28)
+        self._set_node_input_default(principled, ("Alpha",), material.diffuse_color[3])
+        base_color = tuple(float(channel) for channel in material.diffuse_color[:4])
+        self._set_node_input_default(principled, ("Base Color",), base_color)
+        blend = (material_def.blend or "none").strip().lower()
+        if blend in {"alpha", "blend", "test"} or material.diffuse_color[3] < 0.999:
+            material.blend_method = "BLEND" if blend in {"alpha", "blend"} else "CLIP"
+            material.use_screen_refraction = False
+            material.show_transparent_back = True
+            if blend == "test" and material_def.alpharef is not None:
+                alpha_threshold = float(material_def.alpharef)
+                if alpha_threshold > 1.0:
+                    alpha_threshold /= 255.0
+                material.alpha_threshold = max(0.0, min(1.0, alpha_threshold))
+
+    def _principled_node(self, node_tree: bpy.types.NodeTree) -> bpy.types.Node | None:
+        return next((node for node in node_tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
+
+    def _set_node_input_default(self, node: bpy.types.Node, names: tuple[str, ...], value) -> None:
+        for name in names:
+            socket = node.inputs.get(name)
+            if socket is None or not hasattr(socket, "default_value"):
+                continue
+            try:
+                socket.default_value = value
+            except (TypeError, ValueError):
+                continue
+            return
+
+    def _attach_goh_material_textures(self, material: bpy.types.Material, material_def: MaterialDef) -> None:
+        material.use_nodes = True
+        node_tree = material.node_tree
+        if node_tree is None:
+            return
+        principled = self._principled_node(node_tree)
+        if principled is None:
+            return
+
+        diffuse_node = self._texture_node(node_tree, material_def.diffuse_texture or material_def.simple_texture, colorspace="sRGB")
+        if diffuse_node is not None:
+            base_output = diffuse_node.outputs.get("Color")
+            if base_output is not None and "Base Color" in principled.inputs:
+                node_tree.links.new(base_output, principled.inputs["Base Color"])
+
+        specular_node = self._texture_node(node_tree, material_def.specular_texture, colorspace="Non-Color")
+        if specular_node is not None:
+            specular_output = self._grayscale_texture_output(node_tree, specular_node)
+            if specular_output is not None:
+                specular_socket = principled.inputs.get("Specular IOR Level") or principled.inputs.get("Specular")
+                if specular_socket is not None:
+                    node_tree.links.new(specular_output, specular_socket)
+
+        normal_node = self._texture_node(node_tree, material_def.bump_texture, colorspace="Non-Color")
+        if normal_node is not None and "Normal" in principled.inputs:
+            try:
+                normal_map = node_tree.nodes.new(type="ShaderNodeNormalMap")
+                if "Strength" in normal_map.inputs:
+                    normal_map.inputs["Strength"].default_value = 1.0
+                node_tree.links.new(normal_node.outputs["Color"], normal_map.inputs["Color"])
+                node_tree.links.new(normal_map.outputs["Normal"], principled.inputs["Normal"])
+            except Exception as exc:
+                self.warnings.append(f'Material "{material.name}" could not link normal map: {exc}')
+
+    def _texture_node(
+        self,
+        node_tree: bpy.types.NodeTree,
+        texture_name: str | None,
+        *,
+        colorspace: str,
+    ) -> bpy.types.Node | None:
+        if not texture_name:
+            return None
+        image_path = self._resolve_texture_path(texture_name)
+        if image_path is None:
+            self.warnings.append(f'Texture "{texture_name}" was not found near "{self.input_path.name}".')
+            return None
+        try:
+            image = bpy.data.images.load(str(image_path), check_existing=True)
+        except RuntimeError:
+            self.warnings.append(f'Texture "{texture_name}" could not be loaded by Blender.')
+            return None
+        try:
+            image.colorspace_settings.name = colorspace
+        except TypeError:
+            pass
         tex_node = node_tree.nodes.new(type="ShaderNodeTexImage")
         tex_node.image = image
-        principled = next((node for node in node_tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
-        if principled is not None and "Base Color" in principled.inputs:
-            node_tree.links.new(tex_node.outputs["Color"], principled.inputs["Base Color"])
+        tex_node.label = texture_name
+        return tex_node
+
+    def _grayscale_texture_output(
+        self,
+        node_tree: bpy.types.NodeTree,
+        texture_node: bpy.types.Node,
+    ) -> bpy.types.NodeSocket | None:
+        try:
+            rgb_to_bw = node_tree.nodes.new(type="ShaderNodeRGBToBW")
+            node_tree.links.new(texture_node.outputs["Color"], rgb_to_bw.inputs["Color"])
+            return rgb_to_bw.outputs["Val"]
+        except Exception as exc:
+            self.warnings.append(f"Could not convert GOH specular texture to grayscale: {exc}")
+            return None
 
     def _resolve_asset_path(self, file_name: str) -> Path | None:
         raw = Path(file_name.replace("\\", "/"))

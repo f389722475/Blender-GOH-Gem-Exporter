@@ -15,6 +15,7 @@ class GOHAnimationImporter:
         self.axis_rotation = self._axis_rotation_matrix(self.axis_mode)
         self.scale_factor = operator.scale_factor
         self.warnings: list[str] = []
+        self._handedness_warning_keys: set[str] = set()
 
     def import_animation(self) -> list[str]:
         animation = read_animation(self.operator.filepath)
@@ -435,10 +436,28 @@ class GOHAnimationImporter:
         rest_matrix = self._stored_rest_local_matrix(obj)
         if rest_matrix is None:
             return local_matrix
+        if self._matrix_handedness_mismatch(rest_matrix, local_matrix):
+            key = str(obj.get("goh_bone_name") or obj.name)
+            if key not in self._handedness_warning_keys:
+                self._handedness_warning_keys.add(key)
+                self.warnings.append(
+                    f'Animation target "{key}" has handedness that differs from the imported MDL rest transform; '
+                    "preserved the MDL rest handedness for Blender display."
+                )
+            preserved = rest_matrix.copy()
+            preserved.translation = local_matrix.translation
+            return preserved
         correction = self._deferred_basis_animation_correction_matrix(obj)
         if correction is None:
             return local_matrix
         return self._convert_deferred_basis_animation_delta(rest_matrix, local_matrix, correction)
+
+    def _matrix_handedness_mismatch(self, rest_matrix: Matrix, local_matrix: Matrix) -> bool:
+        rest_det = rest_matrix.to_3x3().determinant()
+        local_det = local_matrix.to_3x3().determinant()
+        if abs(rest_det) <= EPSILON or abs(local_det) <= EPSILON:
+            return False
+        return (rest_det < 0.0) != (local_det < 0.0)
 
     def _convert_deferred_basis_animation_delta(
         self,
