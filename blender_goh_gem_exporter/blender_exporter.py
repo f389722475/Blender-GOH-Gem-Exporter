@@ -49,7 +49,7 @@ from .goh_core import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
-GOH_ADDON_VERSION = "1.2.0"
+GOH_ADDON_VERSION = "1.2.1"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),
@@ -904,6 +904,7 @@ class GOHToolSettings(PropertyGroup):
             ("ROUNDED_BOX", "Rounded Box", "Rounded box cage for smoother vehicle volumes"),
             ("SPHERE", "Quad Sphere", "Cube-sphere cage for round turrets, mantlets, and domes"),
             ("LOFT", "Loft Cage", "Lengthwise profile cage for hulls and turrets with sloped or tapered silhouettes"),
+            ("BARREL", "Barrel Cage", "Stable tube cage for long gun barrels and cannons"),
             ("AUTO", "Auto", "Choose a cage template from the source proportions"),
         ),
         default="AUTO",
@@ -6077,7 +6078,9 @@ class GOHAnimationImporter:
                 obj = object_map.get(bone_name)
                 if obj is None:
                     continue
-                location, rotation = self._decode_matrix_rows(state.matrix)
+                local_matrix = self._decode_matrix_rows_as_matrix(state.matrix)
+                local_matrix = self._object_animation_display_matrix(obj, local_matrix)
+                location, rotation, _scale = local_matrix.decompose()
                 obj.rotation_mode = "QUATERNION"
                 obj.location = location
                 obj.rotation_quaternion = rotation
@@ -6097,23 +6100,112 @@ class GOHAnimationImporter:
             return obj_imported
         return False
 
+    def _object_animation_display_matrix(self, obj: bpy.types.Object, local_matrix: Matrix) -> Matrix:
+        rest_matrix = self._stored_rest_local_matrix(obj)
+        if rest_matrix is None:
+            return local_matrix
+        correction = self._deferred_basis_animation_correction_matrix(obj)
+        if correction is None:
+            return local_matrix
+        return self._convert_deferred_basis_animation_delta(rest_matrix, local_matrix, correction)
+
+    def _convert_deferred_basis_animation_delta(
+        self,
+        rest_matrix: Matrix,
+        loc_rot_matrix: Matrix,
+        correction: Matrix,
+    ) -> Matrix:
+        rest_loc_rot = self._loc_rot_matrix(rest_matrix)
+        delta = rest_loc_rot.inverted_safe() @ loc_rot_matrix
+        delta_loc, delta_rot, _delta_scale = delta.decompose()
+        correction3 = correction.to_3x3()
+        corrected_loc = correction3 @ delta_loc
+        delta_rot_matrix = delta_rot.to_matrix().to_4x4()
+        corrected_rot_matrix = correction @ delta_rot_matrix.inverted_safe() @ correction.inverted_safe()
+        return rest_loc_rot @ Matrix.Translation(corrected_loc) @ corrected_rot_matrix
+
+    def _deferred_basis_animation_correction_matrix(self, obj: bpy.types.Object) -> Matrix | None:
+        basis = self._basis_helper_ancestor(obj)
+        if basis is None or not basis.get("goh_deferred_basis_flip"):
+            return None
+        basis_rest = self._stored_rest_local_matrix(basis)
+        if basis_rest is None or not self._matrix_is_mirrored(basis_rest):
+            return None
+        return self._basis_rotation_matrix().to_4x4()
+
+    def _basis_helper_ancestor(self, obj: bpy.types.Object) -> bpy.types.Object | None:
+        parent = obj.parent
+        while parent is not None:
+            if self._is_basis_helper_object(parent):
+                return parent
+            parent = parent.parent
+        return None
+
+    def _is_basis_helper_object(self, obj: bpy.types.Object | None) -> bool:
+        if obj is None:
+            return False
+        if obj.get("goh_basis_helper"):
+            return True
+        return obj.type == "EMPTY" and obj.name.lower() == GOH_BASIS_HELPER_NAME.lower()
+
+    def _stored_rest_local_matrix(self, obj: bpy.types.Object | None) -> Matrix | None:
+        if obj is None:
+            return None
+        values = obj.get("goh_rest_matrix_local")
+        if values is None:
+            return None
+        try:
+            floats = [float(value) for value in values]
+        except (TypeError, ValueError):
+            return None
+        if len(floats) != 16:
+            return None
+        return Matrix(
+            (
+                floats[0:4],
+                floats[4:8],
+                floats[8:12],
+                floats[12:16],
+            )
+        )
+
+    def _loc_rot_matrix(self, matrix: Matrix) -> Matrix:
+        loc, rot, _scale = matrix.decompose()
+        return Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+
+    def _basis_rotation_matrix(self) -> Matrix:
+        return Matrix(
+            (
+                (1.0, 0.0, 0.0),
+                (0.0, -1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            )
+        )
+
+    def _matrix_is_mirrored(self, matrix: Matrix) -> bool:
+        return matrix.to_3x3().determinant() < -EPSILON
+
     def _decode_matrix_rows(
         self,
         matrix_rows: tuple[tuple[float, float, float], ...],
     ) -> tuple[Vector, tuple[float, float, float, float]]:
+        matrix = self._decode_matrix_rows_as_matrix(matrix_rows)
+        location, rotation, _scale = matrix.decompose()
+        return Vector((location.x, location.y, location.z)), (
+            float(rotation.w),
+            float(rotation.x),
+            float(rotation.y),
+            float(rotation.z),
+        )
+
+    def _decode_matrix_rows_as_matrix(self, matrix_rows: tuple[tuple[float, float, float], ...]) -> Matrix:
         axis3 = self.axis_rotation.to_3x3()
         rotation = Matrix((matrix_rows[0], matrix_rows[1], matrix_rows[2]))
         converted_rotation = axis3.inverted() @ rotation @ axis3
         location = axis3.inverted() @ Vector(matrix_rows[3])
         if abs(self.scale_factor) > EPSILON:
             location /= self.scale_factor
-        quaternion = converted_rotation.to_quaternion()
-        return Vector((location.x, location.y, location.z)), (
-            float(quaternion.w),
-            float(quaternion.x),
-            float(quaternion.y),
-            float(quaternion.z),
-        )
+        return Matrix.Translation(location) @ converted_rotation.to_4x4()
 
     def _axis_rotation_matrix(self, axis_mode: str) -> Matrix:
         if axis_mode == "GOH_TO_BLENDER":
@@ -6129,7 +6221,7 @@ class GOHModelImporter:
         self.input_dir = self.input_path.parent
         self.axis_rotation = self._axis_rotation_matrix(operator.axis_mode)
         self.scale_factor = operator.scale_factor
-        self.defer_basis_flip = bool(getattr(operator, "defer_basis_flip", True))
+        self.defer_basis_flip = bool(getattr(operator, "defer_basis_flip", False))
         self.warnings: list[str] = []
         self.material_cache: dict[str, bpy.types.Material] = {}
         self.bone_objects: dict[str, bpy.types.Object] = {}
@@ -6240,6 +6332,7 @@ class GOHModelImporter:
     def _create_mesh_object(self, object_name: str, mesh_data: MeshData) -> bpy.types.Object:
         vertices = [self._decode_point(vertex.position) for vertex in mesh_data.vertices]
         faces: list[tuple[int, int, int]] = []
+        loop_normals: list[Vector] = []
         face_material_indices: list[int] = []
         material_files: list[str] = []
         material_index_by_file: dict[str, int] = {}
@@ -6251,11 +6344,17 @@ class GOHModelImporter:
             material_index = material_index_by_file[material_file]
             for triangle in section.triangle_indices:
                 faces.append(triangle)
+                for vertex_index in triangle:
+                    if 0 <= vertex_index < len(mesh_data.vertices):
+                        loop_normals.append(self._decode_direction(mesh_data.vertices[vertex_index].normal))
+                    else:
+                        loop_normals.append(Vector((0.0, 0.0, 1.0)))
                 face_material_indices.append(material_index)
 
         mesh = bpy.data.meshes.new(f"{object_name}_mesh")
         mesh.from_pydata(vertices, [], faces)
         mesh.update()
+        self._apply_imported_loop_normals(mesh, loop_normals, mesh_data.file_name)
 
         if mesh_data.vertices and mesh.polygons:
             uv_layer = mesh.uv_layers.new(name="UVMap")
@@ -6276,6 +6375,40 @@ class GOHModelImporter:
         self._link_object(obj)
         self._apply_vertex_groups(obj, mesh_data)
         return obj
+
+    def _apply_imported_loop_normals(self, mesh: bpy.types.Mesh, loop_normals: list[Vector], source_name: str) -> None:
+        if not loop_normals:
+            return
+        if len(loop_normals) != len(mesh.loops):
+            self.warnings.append(
+                f'Mesh "{source_name}" skipped imported normals: {len(loop_normals)} normals for {len(mesh.loops)} loops.'
+            )
+            return
+        normalized_normals: list[tuple[float, float, float]] = []
+        missing_normals = 0
+        for normal in loop_normals:
+            converted = Vector(normal)
+            if converted.length <= EPSILON:
+                missing_normals += 1
+                converted = Vector((0.0, 0.0, 1.0))
+            else:
+                converted.normalize()
+            normalized_normals.append((float(converted.x), float(converted.y), float(converted.z)))
+        for polygon in mesh.polygons:
+            polygon.use_smooth = True
+        if not hasattr(mesh, "normals_split_custom_set"):
+            self.warnings.append(f'Mesh "{source_name}" could not apply imported normals: Blender custom split normals API unavailable.')
+            return
+        try:
+            mesh.normals_split_custom_set(normalized_normals)
+            mesh.update()
+            mesh["goh_imported_custom_normals"] = True
+            mesh["goh_imported_custom_normal_loops"] = len(normalized_normals)
+            if missing_normals:
+                mesh["goh_imported_custom_normal_missing"] = missing_normals
+                self.warnings.append(f'Mesh "{source_name}" had {missing_normals} zero imported normal(s); used fallback normals.')
+        except Exception as exc:
+            self.warnings.append(f'Mesh "{source_name}" could not apply imported normals: {exc}')
 
     def _apply_vertex_groups(self, obj: bpy.types.Object, mesh_data: MeshData) -> None:
         if not mesh_data.skinned_bones:
@@ -6631,6 +6764,12 @@ class GOHModelImporter:
             converted /= self.scale_factor
         return Vector((converted.x, converted.y, converted.z))
 
+    def _decode_direction(self, direction: tuple[float, float, float]) -> Vector:
+        converted = self.axis_rotation.to_3x3().inverted() @ Vector(direction)
+        if converted.length > EPSILON:
+            converted.normalize()
+        return Vector((converted.x, converted.y, converted.z))
+
     def _decode_length(self, value: float) -> float:
         if abs(self.scale_factor) <= EPSILON:
             return float(value)
@@ -6752,7 +6891,7 @@ class IMPORT_SCENE_OT_goh_model(Operator, ImportHelper):
     defer_basis_flip: BoolProperty(
         name="Defer Basis Flip",
         description="Show imported GOH basis bones without the mirror transform in Blender, but keep the stored GOH basis for export",
-        default=True,
+        default=False,
     )
 
     def draw(self, _context: bpy.types.Context) -> None:
@@ -7800,6 +7939,18 @@ def _auto_quad_should_use_loft(template: str, category: str, size: Vector) -> bo
     return horizontal_long / vertical >= 1.45
 
 
+def _auto_quad_should_use_barrel(template: str, category: str, size: Vector) -> bool:
+    template = template.upper()
+    if template == "BARREL":
+        return True
+    if template != "AUTO" or category != "gun":
+        return False
+    length = max(float(size.x), EPSILON)
+    cross_long = max(float(size.y), float(size.z), EPSILON)
+    cross_short = max(min(float(size.y), float(size.z)), EPSILON)
+    return length >= 1.0 and length / cross_long >= 5.0 and cross_long / cross_short <= 2.2
+
+
 def _resolve_auto_quad_template(
     template: str,
     category: str,
@@ -7843,6 +7994,132 @@ def _smooth_numeric_profile(values: list[float], passes: int = 2) -> list[float]
             nxt[index] = (current[index - 1] + current[index] * 2.0 + current[index + 1]) * 0.25
         current = nxt
     return current
+
+
+def _numeric_percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = max(0.0, min(1.0, float(percentile))) * (len(ordered) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
+def _barrel_ring_sides_for_budget(face_budget: int, slenderness: float) -> int:
+    budget = int(face_budget)
+    if budget <= 80:
+        return 6
+    if slenderness >= 10.0 and budget <= 260:
+        return 8
+    if budget <= 180:
+        return 8
+    if budget <= 360:
+        return 10
+    if budget <= 900:
+        return 12
+    return 14
+
+
+def _build_barrel_quad_cage(
+    points: list[Vector],
+    axes: tuple[Vector, Vector, Vector],
+    face_budget: int,
+    offset: float,
+) -> tuple[list[Vector], list[tuple[int, int, int, int]]]:
+    origin = _average_vectors(points)
+    local_points = [
+        (
+            (point - origin).dot(axes[0]),
+            (point - origin).dot(axes[1]),
+            (point - origin).dot(axes[2]),
+        )
+        for point in points
+    ]
+    min_a = min(point[0] for point in local_points)
+    max_a = max(point[0] for point in local_points)
+    length = max(max_a - min_a, EPSILON)
+    cross_extent = max(
+        max(point[1] for point in local_points) - min(point[1] for point in local_points),
+        max(point[2] for point in local_points) - min(point[2] for point in local_points),
+        EPSILON,
+    )
+    sides = _barrel_ring_sides_for_budget(face_budget, length / cross_extent)
+    rings = max(4, min(96, (max(int(face_budget), sides * 4) - sides) // sides + 1))
+    step = length / max(1, rings - 1)
+    slab = max(step * 0.70, length * 0.01)
+    station_values = [min_a - offset + (length + 2.0 * offset) * index / max(1, rings - 1) for index in range(rings)]
+
+    half_b_values: list[float] = []
+    half_c_values: list[float] = []
+    trim_min = min_a + length * 0.12
+    trim_max = max_a - length * 0.12
+    center_sample = [point for point in local_points if trim_min <= point[0] <= trim_max]
+    if len(center_sample) < max(12, sides * 2):
+        center_sample = local_points
+    stable_center_b = _numeric_percentile([point[1] for point in center_sample], 0.5)
+    stable_center_c = _numeric_percentile([point[2] for point in center_sample], 0.5)
+
+    for station in station_values:
+        station_core = max(min_a, min(max_a, station))
+        selected = [point for point in local_points if abs(point[0] - station_core) <= slab]
+        if len(selected) < max(8, sides):
+            selected = sorted(local_points, key=lambda point: abs(point[0] - station_core))[:max(8, min(len(local_points), sides * 3))]
+        b_values = [point[1] for point in selected]
+        c_values = [point[2] for point in selected]
+        half_b = max(abs(value - stable_center_b) for value in b_values) + offset
+        half_c = max(abs(value - stable_center_c) for value in c_values) + offset
+        half_b_values.append(max(half_b * 1.035, offset + EPSILON))
+        half_c_values.append(max(half_c * 1.035, offset + EPSILON))
+
+    half_b_values = _smooth_numeric_profile(half_b_values, 2)
+    half_c_values = _smooth_numeric_profile(half_c_values, 2)
+
+    vertices: list[Vector] = []
+    ring_indices: list[list[int]] = []
+    for ring_index, station in enumerate(station_values):
+        ring: list[int] = []
+        for side_index in range(sides):
+            angle = 2.0 * math.pi * side_index / sides
+            b_offset = math.cos(angle) * half_b_values[ring_index]
+            c_offset = math.sin(angle) * half_c_values[ring_index]
+            vertices.append(
+                origin
+                + axes[0] * station
+                + axes[1] * (stable_center_b + b_offset)
+                + axes[2] * (stable_center_c + c_offset)
+            )
+            ring.append(len(vertices) - 1)
+        ring_indices.append(ring)
+
+    faces: list[tuple[int, int, int, int]] = []
+    for ring_index in range(rings - 1):
+        current = ring_indices[ring_index]
+        nxt = ring_indices[ring_index + 1]
+        for side_index in range(sides):
+            following = (side_index + 1) % sides
+            faces.append((current[side_index], nxt[side_index], nxt[following], current[following]))
+
+    def cap_center(ring_index: int) -> int:
+        station = station_values[ring_index]
+        vertices.append(origin + axes[0] * station + axes[1] * stable_center_b + axes[2] * stable_center_c)
+        return len(vertices) - 1
+
+    start_center = cap_center(0)
+    end_center = cap_center(rings - 1)
+    start_ring = ring_indices[0]
+    end_ring = ring_indices[-1]
+    for side_index in range(0, sides, 2):
+        faces.append((start_center, start_ring[(side_index + 2) % sides], start_ring[(side_index + 1) % sides], start_ring[side_index]))
+        faces.append((end_center, end_ring[side_index], end_ring[(side_index + 1) % sides], end_ring[(side_index + 2) % sides]))
+
+    if _quad_cage_signed_volume(vertices, faces) < 0.0:
+        faces = [tuple(reversed(face)) for face in faces]
+    return vertices, faces
 
 
 def _build_loft_quad_cage(
@@ -8033,6 +8310,57 @@ def _expand_quad_cage_to_cover_points(
     if scale_factor > 1.0 + EPSILON:
         vertices = [center + (vertex - center) * scale_factor for vertex in vertices]
     return vertices, _max_outside_distance_quads(vertices, faces, source_points)
+
+
+def _max_outside_distance_bounds(
+    vertices: list[Vector],
+    source_points: list[Vector],
+    axes: tuple[Vector, Vector, Vector],
+    offset: float,
+) -> float:
+    outside = 0.0
+    margin = max(0.0, float(offset))
+    for axis in axes:
+        vertex_values = [vertex.dot(axis) for vertex in vertices]
+        point_values = [point.dot(axis) for point in source_points]
+        outside = max(outside, min(vertex_values) - (min(point_values) - margin))
+        outside = max(outside, (max(point_values) + margin) - max(vertex_values))
+    return max(0.0, outside)
+
+
+def _expand_cage_bounds_to_cover_points(
+    vertices: list[Vector],
+    source_points: list[Vector],
+    axes: tuple[Vector, Vector, Vector],
+    offset: float,
+    max_scale_factor: float = 1.2,
+) -> tuple[list[Vector], float]:
+    if not vertices or not source_points:
+        return vertices, math.inf
+    adjusted = [vertex.copy() for vertex in vertices]
+    scale_limit = max(1.0, float(max_scale_factor))
+    for axis in axes:
+        current_values = [vertex.dot(axis) for vertex in adjusted]
+        point_values = [point.dot(axis) for point in source_points]
+        current_min = min(current_values)
+        current_max = max(current_values)
+        current_center = (current_min + current_max) * 0.5
+        current_half = max((current_max - current_min) * 0.5, EPSILON)
+        desired_min = min(point_values) - max(0.0, float(offset))
+        desired_max = max(point_values) + max(0.0, float(offset))
+        target_min = min(current_min, desired_min)
+        target_max = max(current_max, desired_max)
+        target_center = (target_min + target_max) * 0.5
+        desired_half = max((target_max - target_min) * 0.5, current_half)
+        target_half = min(desired_half, current_half * scale_limit)
+        next_vertices: list[Vector] = []
+        for vertex in adjusted:
+            current_value = vertex.dot(axis)
+            normalized = (current_value - current_center) / current_half
+            target_value = target_center + normalized * target_half
+            next_vertices.append(vertex + axis * (target_value - current_value))
+        adjusted = next_vertices
+    return adjusted, _max_outside_distance_bounds(adjusted, source_points, axes, offset)
 
 
 def _auto_quad_fit_points(points: list[Vector], max_points: int = 1200) -> list[Vector]:
@@ -8358,6 +8686,34 @@ def _taubin_smooth_quad_cage(
     return _expand_quad_cage_to_cover_points(current, faces, source_points, offset, max_scale_factor)
 
 
+def _taubin_smooth_cage_shape(
+    vertices: list[Vector],
+    faces: list[tuple[int, ...]],
+    iterations: int,
+) -> list[Vector]:
+    iterations = max(0, int(iterations))
+    if iterations <= 0:
+        return [vertex.copy() for vertex in vertices]
+    neighbors = _quad_cage_vertex_neighbors(faces, len(vertices))
+
+    def smooth_step(current: list[Vector], factor: float) -> list[Vector]:
+        result: list[Vector] = []
+        for index, vertex in enumerate(current):
+            linked = neighbors[index]
+            if not linked:
+                result.append(vertex.copy())
+                continue
+            average = _average_vectors([current[neighbor] for neighbor in linked])
+            result.append(vertex + (average - vertex) * factor)
+        return result
+
+    current = [vertex.copy() for vertex in vertices]
+    for _iteration in range(iterations):
+        current = smooth_step(current, 0.33)
+        current = smooth_step(current, -0.34)
+    return current
+
+
 def _planarize_quad_cage(
     vertices: list[Vector],
     faces: list[tuple[int, ...]],
@@ -8425,33 +8781,54 @@ def _build_auto_quad_cage_once(
     axes = _auto_quad_axes_for_group(group, category)
     center, axes, size = _oriented_bounds_from_axes(group.points, axes, offset)
 
-    if _auto_quad_should_use_loft(template, category, size):
+    uses_axis_bounds = False
+    if _auto_quad_should_use_barrel(template, category, size):
+        vertices, faces = _build_barrel_quad_cage(group.points, axes, generation_budget, offset)
+        template = "BARREL"
+        uses_axis_bounds = True
+    elif _auto_quad_should_use_loft(template, category, size):
         vertices, faces = _build_loft_quad_cage(group.points, axes, generation_budget, offset)
         template = "LOFT"
+        uses_axis_bounds = True
     else:
         local_vertices, faces = _build_subdivided_cube_cage(subdivision)
         template = _resolve_auto_quad_template(template, category, group, size)
         shaped_vertices = _apply_quad_cage_template(local_vertices, template, size)
         vertices = _align_template_to_obb(shaped_vertices, center, axes, size)
-    expansion_limit = 1.25 if template == "LOFT" else 3.0
-    vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, faces, fit_points, offset, expansion_limit)
-
-    if fit_mode == "RAY":
-        vertices, max_outside = _fit_quad_cage_by_raycast(vertices, faces, group, offset, expansion_limit)
-    if smooth_iterations > 0:
-        vertices, max_outside = _taubin_smooth_quad_cage(
-            vertices,
-            faces,
-            smooth_iterations,
-            fit_points,
-            offset,
-            expansion_limit,
-        )
-    if planarize_quads:
-        vertices = _planarize_quad_cage(vertices, faces, planarize_strength)
+    expansion_limit = 1.10 if template == "BARREL" else 1.12 if uses_axis_bounds else 3.0
+    if uses_axis_bounds:
+        vertices, max_outside = _expand_cage_bounds_to_cover_points(vertices, fit_points, axes, offset, expansion_limit)
+    else:
         vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, faces, fit_points, offset, expansion_limit)
 
-    vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, faces, group.points, offset, expansion_limit)
+    if fit_mode == "RAY" and not uses_axis_bounds:
+        vertices, max_outside = _fit_quad_cage_by_raycast(vertices, faces, group, offset, expansion_limit)
+    if smooth_iterations > 0:
+        if uses_axis_bounds:
+            if template != "BARREL":
+                vertices = _taubin_smooth_cage_shape(vertices, faces, smooth_iterations)
+            vertices, max_outside = _expand_cage_bounds_to_cover_points(vertices, fit_points, axes, offset, expansion_limit)
+        else:
+            vertices, max_outside = _taubin_smooth_quad_cage(
+                vertices,
+                faces,
+                smooth_iterations,
+                fit_points,
+                offset,
+                expansion_limit,
+            )
+    if planarize_quads:
+        if template != "BARREL":
+            vertices = _planarize_quad_cage(vertices, faces, planarize_strength)
+        if uses_axis_bounds:
+            vertices, max_outside = _expand_cage_bounds_to_cover_points(vertices, fit_points, axes, offset, expansion_limit)
+        else:
+            vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, faces, fit_points, offset, expansion_limit)
+
+    if uses_axis_bounds:
+        vertices, max_outside = _expand_cage_bounds_to_cover_points(vertices, group.points, axes, offset, expansion_limit)
+    else:
+        vertices, max_outside = _expand_quad_cage_to_cover_points(vertices, faces, group.points, offset, expansion_limit)
 
     faces = _apply_auto_quad_output_topology(faces, output_topology)
     if _quad_cage_signed_volume(vertices, faces) < 0.0:
@@ -8526,7 +8903,7 @@ def _auto_quad_candidate_templates(settings: GOHToolSettings, category: str) -> 
     if category in {"body", "turret"}:
         defaults = ["AUTO", "LOFT", "ROUNDED_BOX", "BOX", "SPHERE"]
     elif category == "gun":
-        defaults = ["AUTO", "ROUNDED_BOX", "BOX", "LOFT"]
+        defaults = ["AUTO", "BARREL", "LOFT", "ROUNDED_BOX", "BOX"]
     else:
         defaults = ["AUTO", "ROUNDED_BOX", "BOX", "SPHERE", "LOFT"]
     return [str(value) for value in _unique_auto_quad_values([selected, *defaults])]
@@ -8725,8 +9102,14 @@ def _score_auto_quad_cage_result(
     score -= abs(0.82 - face_ratio) * 5.0
     if "fallback" in result.mode:
         score -= 45.0
-    if category in {"body", "turret"} and "loft" in result.mode:
-        score += 8.0
+    if category == "body" and "loft" in result.mode:
+        score += 26.0
+    if category == "turret" and "loft" in result.mode:
+        score += 30.0
+    if category in {"body", "turret"} and any(token in result.mode for token in ("rounded_box", "sphere")):
+        score -= 10.0
+    if category == "gun" and "barrel" in result.mode:
+        score += 16.0
     if category == "gun" and "rounded_box" in result.mode:
         score += 4.0
     return score

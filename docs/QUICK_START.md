@@ -39,8 +39,8 @@
 ## 5. Import / View Existing MDL
 
 - Use `File > Import > GOH Model (.mdl)` or `View3D > Sidebar > GOH > GOH Export > Import GOH Model`
-- Keep `Axis Conversion = None / GOH Native`, `Scale Factor = 20`, `Flip V = On`, and `Defer Basis Flip = On` for SOEdit-style round trips
-- With `Defer Basis Flip`, Blender shows a non-mirrored editing parent while export still writes the GOH basis orientation and ANM pitch parity, so hand-authored animation matches SOEdit/game direction
+- Keep `Axis Conversion = None / GOH Native`, `Scale Factor = 20`, `Flip V = On`, and `Defer Basis Flip = Off` when you want Blender to match SOEdit/game hierarchy and helper placement
+- Enable `Defer Basis Flip` only for older non-mirrored editing scenes; ANM import and export both apply the same handness compensation when that mode is used
 - Keep `LOD0 Only = On` for quick viewing
 - Keep `Import Volumes = On` when checking collision helpers
 - After importing the model, use `File > Import > GOH Animation (.anm)` with `Axis Conversion = Auto / Match Imported Model` so the animation reuses the model's axis and scale settings

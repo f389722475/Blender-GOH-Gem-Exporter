@@ -26,7 +26,7 @@
 4. 常规编辑建议使用：
    - `Axis Conversion = None / GOH Native`
    - `Scale Factor = 20`
-   - `Defer Basis Flip = On`
+   - `Defer Basis Flip = Off`
    - `Import Volumes = On`
    - `LOD0 Only = On`，快速查看时打开即可
 5. 在 Outliner 里观察官方模型层级。
@@ -535,7 +535,7 @@ goh_sequence_ranges = fire:1-48; hit_body:49-96
 
 ### 导出的动画方向镜像了
 
-导入 GOH 原生模型时保持 `Defer Basis Flip = On`。这样 Blender 里看到的编辑方向会和 SOEdit / 游戏导出转换保持一致。
+导入 GOH 原生模型时，如果目标是和 SOEdit / 游戏内 helper 点位、子物体方向完全一致，保持 `Defer Basis Flip = Off`。只有在旧工程需要非镜像 Blender 编辑父级时才手动打开；该模式下 `.anm` 导入和导出都会走同一套手性补偿。
 
 ## 15. 出包前检查清单
 
@@ -553,4 +553,3 @@ goh_sequence_ranges = fire:1-48; hit_body:49-96
 - 材质有 GOH texture 字段。
 - Basis helper 已同步。
 - Validation report 没有 Error。
-

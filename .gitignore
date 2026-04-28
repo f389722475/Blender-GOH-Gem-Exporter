@@ -9,6 +9,7 @@ __pycache__/
 runtime_test_output/
 dist/
 release/
+.tools/
 *.zip
 
 Thumbs.db
