@@ -76,7 +76,7 @@ from .presets import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
-GOH_ADDON_VERSION = "1.3.2"
+GOH_ADDON_VERSION = "1.4.0"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),
@@ -107,6 +107,17 @@ GOH_PHYSICS_PROP_KEYS = (
     "goh_physics_damping",
     "goh_physics_jitter",
     "goh_physics_rotation",
+    "goh_physics_solver_space",
+    "goh_physics_mass",
+    "goh_physics_inertia",
+    "goh_physics_com_offset",
+    "goh_physics_linear_axes",
+    "goh_physics_angular_axes",
+    "goh_physics_max_offset",
+    "goh_physics_max_angle",
+    "goh_physics_substeps",
+    "goh_physics_force_limit",
+    "goh_physics_end_fade",
     "goh_antenna_root_anchor",
     "goh_antenna_segments",
 )
@@ -664,6 +675,38 @@ class GOHToolSettings(PropertyGroup):
         default=0.0,
         min=0.0,
         soft_max=45.0,
+    )
+    physics_solver_space: EnumProperty(
+        name="Solver Space",
+        description="Coordinate frame used by the inertial bake solver",
+        items=(
+            ("PARENT_LOCAL", "Parent Local", "Resolve forces in the driven object's parent space"),
+            ("SOURCE_LOCAL", "Source Local", "Resolve forces in the active recoil source space"),
+            ("OBJECT_LOCAL", "Object Local", "Resolve forces in the driven object's own space"),
+            ("WORLD", "World", "Resolve forces in world axes"),
+        ),
+        default="PARENT_LOCAL",
+    )
+    physics_substeps: IntProperty(
+        name="Substeps",
+        description="Semi-implicit solver substeps per frame for stable inertial bakes",
+        default=4,
+        min=1,
+        max=32,
+    )
+    physics_force_limit: FloatProperty(
+        name="Force Limit",
+        description="Optional acceleration clamp before inertial integration; zero disables the clamp",
+        default=0.0,
+        min=0.0,
+        soft_max=250.0,
+    )
+    physics_end_fade: FloatProperty(
+        name="End Fade",
+        description="Final portion of the baked clip forced back to rest",
+        default=0.16,
+        min=0.0,
+        max=0.50,
     )
     physics_antenna_root_anchor: FloatProperty(
         name="Antenna Root Anchor",
@@ -1937,6 +1980,10 @@ class OBJECT_OT_goh_assign_physics_link(Operator):
             obj["goh_physics_damping"] = damping
             obj["goh_physics_jitter"] = jitter
             obj["goh_physics_rotation"] = rotation
+            obj["goh_physics_solver_space"] = settings.physics_solver_space
+            obj["goh_physics_substeps"] = int(settings.physics_substeps)
+            obj["goh_physics_force_limit"] = float(settings.physics_force_limit)
+            obj["goh_physics_end_fade"] = float(settings.physics_end_fade)
             if settings.physics_link_role == "ANTENNA_WHIP":
                 obj["goh_antenna_root_anchor"] = float(settings.physics_antenna_root_anchor)
                 obj["goh_antenna_segments"] = int(settings.physics_antenna_segments)
@@ -2187,6 +2234,10 @@ class OBJECT_OT_goh_load_physics_defaults(Operator):
         settings.physics_link_damping = damping
         settings.physics_link_rotation = rotation
         settings.physics_link_jitter = _physics_role_jitter_default(settings.physics_link_role)
+        settings.physics_solver_space = "PARENT_LOCAL"
+        settings.physics_substeps = 4
+        settings.physics_force_limit = 0.0
+        settings.physics_end_fade = 0.16
         self.report({"INFO"}, f"Loaded physics defaults for {settings.physics_link_role}.")
         return {"FINISHED"}
 
@@ -2363,6 +2414,11 @@ class VIEW3D_PT_goh_tools(Panel):
         physics_box.prop(settings, "physics_link_damping")
         physics_box.prop(settings, "physics_link_jitter")
         physics_box.prop(settings, "physics_link_rotation")
+        physics_box.prop(settings, "physics_solver_space")
+        row = physics_box.row(align=True)
+        row.prop(settings, "physics_substeps")
+        row.prop(settings, "physics_end_fade")
+        physics_box.prop(settings, "physics_force_limit")
         if settings.physics_link_role == "ANTENNA_WHIP":
             physics_box.prop(settings, "physics_antenna_root_anchor")
             physics_box.prop(settings, "physics_antenna_segments")

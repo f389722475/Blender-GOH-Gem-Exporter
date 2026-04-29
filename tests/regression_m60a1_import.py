@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 ADDON_PARENT = ROOT
 if str(ADDON_PARENT) not in sys.path:
     sys.path.insert(0, str(ADDON_PARENT))
+for module_name in list(sys.modules):
+    if module_name == "blender_goh_gem_exporter" or module_name.startswith("blender_goh_gem_exporter."):
+        del sys.modules[module_name]
 
 import blender_goh_gem_exporter as addon  # noqa: E402
 

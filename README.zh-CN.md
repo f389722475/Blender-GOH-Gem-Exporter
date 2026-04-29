@@ -6,7 +6,7 @@
 
 它的目标不是简单复刻 3ds Max MultiScript，而是在 Blender 里提供更现代、更结构化的 GOH 模型、碰撞、材质、动画和物理烘焙工作流。
 
-当前发布版本：`1.3.2`。
+当前发布版本：`1.4.0`。
 
 ## 主要功能
 
@@ -29,9 +29,9 @@
 
 正式发布包里有两个 zip：
 
-- `blender_goh_gem_exporter-1.3.2.zip`
+- `blender_goh_gem_exporter-1.4.0.zip`
   Blender 插件安装包，推荐在 Blender 里直接安装这个文件。
-- `blender_goh_gem_exporter-1.3.2-full.zip`
+- `blender_goh_gem_exporter-1.4.0-full.zip`
   完整源码、文档、测试和示例素材快照，适合 GitHub 发布页或二次开发。
 
 安装步骤：
@@ -39,7 +39,7 @@
 1. 打开 Blender。
 2. 进入 `Edit > Preferences > Add-ons`。
 3. 点击 `Install...`。
-4. 选择 `blender_goh_gem_exporter-1.3.2.zip`。
+4. 选择 `blender_goh_gem_exporter-1.4.0.zip`。
 5. 启用 `GOH GEM Exporter`。
 
 ## Blender 面板

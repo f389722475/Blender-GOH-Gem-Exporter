@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 ADDON_PARENT = ROOT
 if str(ADDON_PARENT) not in sys.path:
     sys.path.insert(0, str(ADDON_PARENT))
+for module_name in list(sys.modules):
+    if module_name == "blender_goh_gem_exporter" or module_name.startswith("blender_goh_gem_exporter."):
+        del sys.modules[module_name]
 
 import blender_goh_gem_exporter as addon  # noqa: E402
 from blender_goh_gem_exporter import blender_exporter as exporter_module  # noqa: E402
@@ -487,6 +490,8 @@ def main() -> None:
             raise RuntimeError("Physics link assignment did not auto-store body spring role defaults.")
         if float(recoil_body.get("goh_physics_frequency", 0.0)) <= 0.0:
             raise RuntimeError("Physics link assignment did not store role-specific frequency.")
+        if recoil_body.get("goh_physics_solver_space") != tool_settings.physics_solver_space:
+            raise RuntimeError("Physics link assignment did not store the inertial solver-space setting.")
 
         bpy.ops.object.select_all(action="DESELECT")
         recoil_source.select_set(True)
@@ -569,6 +574,17 @@ def main() -> None:
             or abs(recoil_body.location.z) > 1e-6
         ):
             raise RuntimeError("Linked recoil should keep delayed linked parts at rest on the first frame.")
+        source_recoil_axis = exporter_module._physics_axis_world(recoil_source, tool_settings.recoil_axis)
+        body_rest_world = Vector((4.0, 2.4, 0.0))
+        same_direction_body_motion = 0.0
+        for probe_frame in range(1, 1 + tool_settings.recoil_frames + 1):
+            scene.frame_set(probe_frame)
+            same_direction_body_motion = max(
+                same_direction_body_motion,
+                (recoil_body.matrix_world.to_translation() - body_rest_world).dot(source_recoil_axis),
+            )
+        if same_direction_body_motion <= 0.001:
+            raise RuntimeError("Body Spring should move in the same direction as the recoil-force proxy.")
         linked_body_action = recoil_body.animation_data.action
         linked_body_keyframes = [
             keyframe
@@ -925,10 +941,27 @@ def main() -> None:
         ]
         body_rotation = [sample[3] for sample in body_samples]
         body_side = [sample[1] for sample in body_samples]
+        crank_swing = [
+            exporter_module._physics_body_crank_swing(index / 48.0, body_defaults[1], body_defaults[2])
+            for index in range(1, 48)
+        ]
+        crank_signs: list[int] = []
+        for value in crank_swing:
+            if abs(value) <= 0.025:
+                continue
+            sign = 1 if value > 0.0 else -1
+            if not crank_signs or crank_signs[-1] != sign:
+                crank_signs.append(sign)
         if sign_changes(body_rotation, 0.025) < 2:
             raise RuntimeError("Body Spring should produce multiple damped rotation reversals.")
         if sign_changes(body_side, 0.008) < 1:
             raise RuntimeError("Body Spring should include lateral pendulum follow-through.")
+        if min(crank_swing[:14]) >= -0.08 or max(crank_swing[12:28]) <= 0.08 or min(crank_swing[26:42]) >= -0.03:
+            raise RuntimeError("Body Spring crank swing should lift, dip, and rebound before settling.")
+        if max(0, len(crank_signs) - 1) < 3:
+            raise RuntimeError("Body Spring crank swing should include an extra small rebound cycle.")
+        if max(abs(crank_swing[index + 1] - 2.0 * crank_swing[index] + crank_swing[index - 1]) for index in range(1, len(crank_swing) - 1)) > 0.28:
+            raise RuntimeError("Body Spring crank swing curve is too sharp for smooth playback.")
         dominant_early_body_rotation = max(body_rotation[:18], key=lambda value: abs(value))
         if dominant_early_body_rotation >= 0.0:
             raise RuntimeError("Body Spring should start with a nose-up hull swing.")

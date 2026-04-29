@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+## 1.4.0 - 2026-04-29
+
+### Added
+
+- Added a PhysX-inspired inertial bake core with solver-space resolution, source-motion acceleration sampling, mass/inertia-aware semi-implicit integration, D6-lite axis limits, force clamps, substeps, and end fade.
+- Added `Solver Space`, `Substeps`, `Force Limit`, and `End Fade` controls to linked physics bake settings, with matching object custom properties for stored links.
+- Added regression coverage for recoil-force direction, rotated vehicle solver-space invariance, mass scaling, clamp safety, FPS/substep stability, and stale Blender addon module loading.
+
+### Changed
+
+- Migrated non-antenna linked recoil roles to the new inertial solver while preserving the existing Antenna Whip beam/late-rebound mesh bake path.
+- Treats source recoil displacement as a same-direction force proxy for rigid linked bodies, while keeping flexible antenna deformation as root-anchored relative inertial lag.
+- Added a subtle Body Spring crank-style pitch layer so heavy vehicles lift, dip back, and rebound more naturally after firing.
+- Smoothed the Body Spring crank layer over the longer recoil clip and flipped Antenna Whip free-tip bend so antennas lag opposite the anchored recoil motion while preserving the late rebound shape.
+
+### Verified
+
+- Ran the saved `tests/2.blend` inertial physics regression for 5 iterations.
+- Ran the inertia solver math regression for 5 iterations.
+- Ran Blender runtime, M60A1 ANM import, Python compile, and addon smoke tests.
+- Ran the 12-sample random vehicle import regression for 5 iterations.
+
 ## 1.3.2 - 2026-04-29
 
 ### Fixed
