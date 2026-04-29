@@ -436,6 +436,8 @@ class GOHAnimationImporter:
         rest_matrix = self._stored_rest_local_matrix(obj)
         if rest_matrix is None:
             return local_matrix
+        if obj.get("goh_deferred_basis_flip") and self._is_basis_helper_object(obj):
+            return self._deferred_basis_object_animation_matrix(local_matrix)
         if self._matrix_handedness_mismatch(rest_matrix, local_matrix):
             key = str(obj.get("goh_bone_name") or obj.name)
             if key not in self._handedness_warning_keys:
@@ -451,6 +453,10 @@ class GOHAnimationImporter:
         if correction is None:
             return local_matrix
         return self._convert_deferred_basis_animation_delta(rest_matrix, local_matrix, correction)
+
+    def _deferred_basis_object_animation_matrix(self, local_matrix: Matrix) -> Matrix:
+        # GOH basis keys carry coordinate-frame markers; the deferred Blender basis is display-space only.
+        return Matrix.Translation(local_matrix.translation)
 
     def _matrix_handedness_mismatch(self, rest_matrix: Matrix, local_matrix: Matrix) -> bool:
         rest_det = rest_matrix.to_3x3().determinant()

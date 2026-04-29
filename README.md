@@ -6,7 +6,7 @@
 
 It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds Max GOH workflows while keeping the authoring experience Blender-native.
 
-Current release: `1.4.0`.
+Current release: `1.4.1`.
 
 ## Highlights
 
@@ -25,8 +25,8 @@ Current release: `1.4.0`.
 - Generate automatic topology-aware collision cage helpers from selected meshes using the built-in reward-guided Cage Fitter, including legal triangle/quad output, loft profile mode for hulls and turrets, configurable candidate scoring, and per-helper budgets up to 5000 faces
 - Bake linked recoil, impact shake, and armor ripple mesh-animation effects
 - `Antenna Whip` now bakes rooted antenna mesh deformation with a minimum-energy cubic beam curve, source-axis front-back sway, smooth linear shape-key playback, and natural long-tail recoil follow-through
-- GOH model import now preserves source smoothing by applying EPLY normals as Blender custom split normals, and keeps default imported `basis` transforms faithful to SOEdit/game space
-- Imported GOH `basis` mirror transforms can still be deferred for legacy non-mirrored editing; ANM import and export now share the same handedness compensation so Blender, SOEdit, and in-game playback stay aligned
+- GOH model import now preserves source smoothing by applying EPLY normals as Blender custom split normals
+- Imported GOH mirrored `basis` transforms now display in game-matching Blender space by default while preserving original GOH rest metadata for export; ANM import and export share the same handedness compensation so Blender, SOEdit, and in-game playback stay aligned
 - GOH material import follows the GEM texture model: diffuse color, normal map, and specular map are mapped directly, with metallic forced off and roughness derived conservatively for Blender preview parity
 
 ## Repository Layout
@@ -170,10 +170,10 @@ The importer reads:
 - `.mtl` material metadata and local diffuse texture files when Blender can load them
 - `.vol` polyhedron collision helpers plus inline `Box`, `Sphere`, and `Cylinder` volume blocks
 
-Recommended import settings for source-faithful SOEdit/game inspection are `Axis Conversion = None / GOH Native`, `Scale Factor = 20`, `Flip V = On`, and `Defer Basis Flip = Off`.
+Recommended import settings for SOEdit/game-matching inspection are `Axis Conversion = None / GOH Native`, `Scale Factor = 20`, `Flip V = On`, and `Defer Basis Flip = On`.
 Use `LOD0 Only` for quick model viewing, or disable it when you want to inspect all referenced LOD meshes.
 When importing `.anm` clips after a whole `.mdl`, leave animation `Axis Conversion` on `Auto / Match Imported Model` so transforms use the same coordinate space as the model.
-GOH-native mirrored `basis` hierarchies now apply the same ANM handedness compensation Blender needs whether the root mirror is displayed directly or deferred for legacy editing. `Defer Basis Flip` remains an explicit legacy editing option: when enabled, imported GOH root/basis mirror matrices are stored for export but displayed as a non-mirrored Blender parent.
+GOH-native mirrored `basis` hierarchies now defer the root mirror for Blender display by default, while the original mirrored matrix is stored for export. Disable `Defer Basis Flip` only when you intentionally need to inspect the raw mirrored file-space parent.
 
 ## Legacy Max Compatibility
 
@@ -215,7 +215,7 @@ Compatibility rules:
 3. Select the zip file.
 4. Enable `GOH GEM Exporter`
 
-The official release asset is `blender_goh_gem_exporter-1.4.0.zip`.
+The official release asset is `blender_goh_gem_exporter-1.4.1.zip`.
 For a cleaner release-ready package, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Recommended Round-Trip Export Settings
@@ -225,6 +225,7 @@ For SOEdit and legacy Max-style round-trips:
 - `Axis Conversion = None / GOH Native`
 - `Scale Factor = 20`
 - `Flip V = On`
+- `Defer Basis Flip = On`
 
 ## Testing
 
@@ -254,6 +255,7 @@ python -X utf8 tests\smoke_test.py
 - [Detailed Plugin Guide - Chinese](docs/PLUGIN_GUIDE_ZH-CN.md)
 - [Physics Bake Workflow](docs/PHYSICS_BAKE.md)
 - [Official Max Plugin Compatibility Notes](docs/OFFICIAL_MAX_PLUGIN_NOTES.md)
+- [v1.4.1 Release Notes](docs/RELEASE_NOTES_v1.4.1.md)
 - [v1.4.0 Release Notes](docs/RELEASE_NOTES_v1.4.0.md)
 - [v1.3.2 Release Notes](docs/RELEASE_NOTES_v1.3.2.md)
 - [v1.3.1 Release Notes](docs/RELEASE_NOTES_v1.3.1.md)

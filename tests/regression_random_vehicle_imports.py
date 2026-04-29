@@ -112,7 +112,7 @@ def _score_import(mdl: Path, iteration: int) -> SampleResult:
             if len(rest_values) == 16:
                 rest_det_hint = rest_values[0] * ((rest_values[5] * rest_values[10]) - (rest_values[6] * rest_values[9]))
                 if rest_det_hint < 0.0:
-                    mirrored_basis_ok = _determinant(basis) < -1e-5
+                    mirrored_basis_ok = bool(basis.get("goh_deferred_basis_flip")) and _determinant(basis) > 1e-5
         score = 100
         warnings: list[str] = []
         if not imported:
@@ -129,7 +129,7 @@ def _score_import(mdl: Path, iteration: int) -> SampleResult:
             warnings.append("bump material missing specular role metadata")
         if not mirrored_basis_ok:
             score -= 40
-            warnings.append("mirrored basis determinant lost")
+            warnings.append("mirrored basis was not deferred into game-matching display space")
         status = "pass" if score >= 85 else "warn"
         return SampleResult(
             iteration=iteration,

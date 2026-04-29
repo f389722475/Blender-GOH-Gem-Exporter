@@ -9,7 +9,7 @@ This release fixes GitHub issue #3 and keeps the current collision-cage work int
 - GOH `.mdl` import now applies EPLY normals as Blender custom split normals and marks imported polygons smooth.
 - Default model import keeps the source `basis` mirror transform visible, so helper points, gun meshes, and child transforms match SOEdit/game space.
 - `Defer Basis Flip` remains available as an explicit legacy editing option.
-- ANM import and export now use matching deferred-Basis handness compensation, including translation and pitch parity.
+- ANM import and export now use matching deferred-Basis handedness compensation, including translation and pitch parity.
 - The automatic collision cage generator remains at the current topology level, including legal triangle/quad output, budgets up to `5000` faces, and bounded loft fitting for hulls/turrets.
 
 ## Recommended Import Settings

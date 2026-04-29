@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mathutils import Quaternion
+
 from .. import blender_exporter as _legacy
 
 for _name, _value in _legacy.__dict__.items():
@@ -33,6 +35,11 @@ class GOHBlenderExporter:
         self.mesh_groups: dict[MeshGroupKey, list[AttachmentObject]] = {}
         self.group_representatives: dict[MeshGroupKey, bpy.types.Object] = {}
         self.animation_attachments: dict[str, list[AttachmentObject]] = {}
+
+    def _refresh_depsgraph(self) -> bpy.types.Depsgraph:
+        self.context.view_layer.update()
+        self.depsgraph = self.context.evaluated_depsgraph_get()
+        return self.depsgraph
 
     def export(self) -> tuple[ExportBundle, list[str]]:
         visual_objects, volume_objects, obstacle_objects, area_objects = self._collect_scope_objects()
@@ -262,9 +269,12 @@ class GOHBlenderExporter:
             for clip in clip_specs:
                 file_name = self._unique_file_name(clip.file_stem or clip.name, ".anm")
                 frames = self._sample_animation_frames(visual_objects, bone_names, clip)
-                mesh_frames = self._sample_mesh_animation_frames(clip, bundle.meshes, bundle.materials)
                 if not frames:
                     continue
+                if self._should_export_mesh_animation_frames():
+                    mesh_frames = self._sample_mesh_animation_frames(clip, bundle.meshes, bundle.materials)
+                else:
+                    mesh_frames = [{} for _ in frames]
                 animation_map[file_name] = AnimationFile(
                     file_name=file_name,
                     bone_names=bone_names,
@@ -290,6 +300,9 @@ class GOHBlenderExporter:
         if animation_map:
             bundle.animations.update(animation_map)
             bundle.model.sequences.extend(sequences)
+
+    def _should_export_mesh_animation_frames(self) -> bool:
+        return str(self.operator.anm_format or "").strip().upper() == "FRM2"
 
     def _collect_animation_specs(self, visual_objects: set[bpy.types.Object]) -> list[AnimationClipSpec]:
         legacy_specs = self._legacy_animation_specs()
@@ -625,7 +638,7 @@ class GOHBlenderExporter:
         object_map = self._animation_object_map(visual_objects) if self.armature_obj is None else None
         for frame in range(clip.frame_start, clip.frame_end + 1):
             self.context.scene.frame_set(frame, subframe=0.0)
-            self.context.view_layer.update()
+            self._refresh_depsgraph()
             if self.armature_obj is not None:
                 frame_states.append(self._sample_armature_frame_state(bone_names))
             else:
@@ -658,7 +671,7 @@ class GOHBlenderExporter:
         mesh_frames: list[dict[str, MeshAnimationState]] = []
         for frame in range(clip.frame_start, clip.frame_end + 1):
             self.context.scene.frame_set(frame, subframe=0.0)
-            self.context.view_layer.update()
+            self._refresh_depsgraph()
             frame_states: dict[str, MeshAnimationState] = {}
             for bone_name, (attachments, base_mesh, _base_blob, base_stride) in candidates.items():
                 animated_mesh = self._build_mesh_data(base_mesh.file_name, attachments, use_evaluated_mesh=True)
@@ -755,11 +768,14 @@ class GOHBlenderExporter:
     ) -> Matrix:
         loc_rot_matrix = self._loc_rot_matrix(local_matrix)
         rest_matrix = self._stored_rest_local_matrix(obj)
+        if not self._should_export_mesh_animation_frames():
+            loc_rot_matrix = self._mesh_animation_rigid_fallback_matrix(obj, loc_rot_matrix)
+        loc_rot_matrix = self._physics_link_animation_export_matrix(obj, loc_rot_matrix, rest_matrix, clip)
         if rest_matrix is not None:
-            correction = self._deferred_basis_animation_correction_matrix(obj)
+            correction = self._mirrored_basis_animation_correction_matrix(obj)
             if correction is not None:
                 return self._correct_deferred_basis_animation_delta(rest_matrix, loc_rot_matrix, correction)
-        return self._physics_link_animation_export_matrix(obj, loc_rot_matrix, rest_matrix, clip)
+        return loc_rot_matrix
 
     def _physics_link_animation_export_matrix(
         self,
@@ -810,6 +826,15 @@ class GOHBlenderExporter:
             return None
         return self._basis_rotation_matrix().to_4x4()
 
+    def _mirrored_basis_animation_correction_matrix(self, obj: bpy.types.Object) -> Matrix | None:
+        correction = self._deferred_basis_animation_correction_matrix(obj)
+        if correction is not None:
+            return correction
+        basis = self._basis_helper_ancestor(obj)
+        if basis is None or not self._basis_helper_displays_mirrored_space(basis):
+            return None
+        return self._basis_rotation_matrix().to_4x4()
+
     def _physics_link_animation_correction_matrix(self, obj: bpy.types.Object, rest_matrix: Matrix) -> Matrix | None:
         correction = Matrix.Identity(4)
         corrected = False
@@ -822,6 +847,125 @@ class GOHBlenderExporter:
             correction = correction @ local_reflection
             corrected = True
         return correction if corrected else None
+
+    def _mesh_animation_rigid_fallback_matrix(self, obj: bpy.types.Object, loc_rot_matrix: Matrix) -> Matrix:
+        if obj.type != "MESH":
+            return loc_rot_matrix
+        role = str(obj.get("goh_physics_role") or "").strip().upper()
+        if role != "ANTENNA_WHIP":
+            return loc_rot_matrix
+        shape_keys = getattr(obj.data, "shape_keys", None)
+        if shape_keys is None or len(shape_keys.key_blocks) < 2:
+            return loc_rot_matrix
+        if not any(key.name.startswith(GOH_ANTENNA_SHAPE_KEY_PREFIX) for key in shape_keys.key_blocks[1:]):
+            return loc_rot_matrix
+
+        basis_key = shape_keys.key_blocks.get("Basis") or shape_keys.key_blocks[0]
+        base_positions = [point.co.copy() for point in basis_key.data]
+        anchor_data = _physics_antenna_anchor_axis(obj.data)
+        if anchor_data is None:
+            return loc_rot_matrix
+        anchor_axis, min_anchor, max_anchor = anchor_data
+        root_indices, tip_indices = self._antenna_end_indices(base_positions, anchor_axis, min_anchor, max_anchor)
+        if not root_indices or not tip_indices:
+            return loc_rot_matrix
+
+        evaluated_positions = self._evaluated_mesh_positions(obj)
+        if evaluated_positions is None or len(evaluated_positions) != len(base_positions):
+            return loc_rot_matrix
+
+        rest_root = self._average_indexed_vectors(base_positions, root_indices)
+        rest_tip = self._average_indexed_vectors(base_positions, tip_indices)
+        eval_root = self._average_indexed_vectors(evaluated_positions, root_indices)
+        eval_tip = self._average_indexed_vectors(evaluated_positions, tip_indices)
+        rest_direction = rest_tip - rest_root
+        eval_direction = eval_tip - eval_root
+        if rest_direction.length <= EPSILON or eval_direction.length <= EPSILON:
+            return loc_rot_matrix
+
+        rotation_delta = rest_direction.normalized().rotation_difference(eval_direction.normalized())
+        if abs(rotation_delta.angle) <= 1e-5:
+            return loc_rot_matrix
+
+        max_degrees = max(1.0, min(35.0, float(obj.get("goh_physics_rotation", 28.0)) * 1.25))
+        max_angle = math.radians(max_degrees)
+        if rotation_delta.angle > max_angle:
+            rotation_delta = Quaternion(rotation_delta.axis, max_angle)
+
+        loc, rot, _scale = loc_rot_matrix.decompose()
+        root_pivot = rest_root.copy()
+        return (
+            Matrix.Translation(loc)
+            @ rot.to_matrix().to_4x4()
+            @ Matrix.Translation(root_pivot)
+            @ rotation_delta.to_matrix().to_4x4()
+            @ Matrix.Translation(-root_pivot)
+        )
+
+    def _antenna_end_indices(
+        self,
+        positions: list[Vector],
+        anchor_axis: Vector,
+        min_anchor: float,
+        max_anchor: float,
+    ) -> tuple[list[int], list[int]]:
+        length = max_anchor - min_anchor
+        if not positions or length <= EPSILON:
+            return [], []
+        tolerance = max(length * 0.04, EPSILON)
+        projections = [float(point.dot(anchor_axis)) for point in positions]
+        root_indices = [
+            index for index, projection in enumerate(projections)
+            if projection <= min_anchor + tolerance
+        ]
+        tip_indices = [
+            index for index, projection in enumerate(projections)
+            if projection >= max_anchor - tolerance
+        ]
+        if not root_indices:
+            root_indices = [projections.index(min(projections))]
+        if not tip_indices:
+            tip_indices = [projections.index(max(projections))]
+        return root_indices, tip_indices
+
+    def _average_indexed_vectors(self, positions: list[Vector], indices: list[int]) -> Vector:
+        total = Vector((0.0, 0.0, 0.0))
+        for index in indices:
+            total += positions[index]
+        return total / float(len(indices))
+
+    def _evaluated_mesh_positions(self, obj: bpy.types.Object) -> list[Vector] | None:
+        depsgraph = self._refresh_depsgraph()
+        evaluated_obj = obj.evaluated_get(depsgraph)
+        mesh = evaluated_obj.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+        try:
+            return [vertex.co.copy() for vertex in mesh.vertices]
+        finally:
+            evaluated_obj.to_mesh_clear()
+
+    def _active_antenna_shape_key_mesh(self, obj: bpy.types.Object) -> bpy.types.Mesh | None:
+        if obj.type != "MESH":
+            return None
+        role = str(obj.get("goh_physics_role") or "").strip().upper()
+        if role != "ANTENNA_WHIP":
+            return None
+        shape_keys = getattr(obj.data, "shape_keys", None)
+        if shape_keys is None or len(shape_keys.key_blocks) < 2:
+            return None
+        candidates = [
+            key for key in shape_keys.key_blocks[1:]
+            if key.name.startswith(GOH_ANTENNA_SHAPE_KEY_PREFIX) and float(key.value) > 0.5
+        ]
+        if not candidates:
+            return None
+        key_block = max(candidates, key=lambda key: float(key.value))
+        if len(key_block.data) != len(obj.data.vertices):
+            return None
+        mesh = obj.data.copy()
+        for vertex, shape_point in zip(mesh.vertices, key_block.data):
+            vertex.co = shape_point.co
+        mesh.update()
+        return mesh
 
     def _basis_helper_ancestor(self, obj: bpy.types.Object) -> bpy.types.Object | None:
         parent = obj.parent
@@ -1205,9 +1349,13 @@ class GOHBlenderExporter:
         use_evaluated_mesh: bool = False,
     ) -> tuple[OrderedDict[str, list[tuple[RawLoopVertex, RawLoopVertex, RawLoopVertex]]], bool]:
         obj = attachment.obj
-        evaluated_obj = obj.evaluated_get(self.depsgraph) if use_evaluated_mesh else None
-        if evaluated_obj is not None:
-            mesh = evaluated_obj.to_mesh(preserve_all_data_layers=True, depsgraph=self.depsgraph)
+        evaluated_obj = None
+        if use_evaluated_mesh:
+            mesh = self._active_antenna_shape_key_mesh(obj)
+            if mesh is None:
+                depsgraph = self._refresh_depsgraph()
+                evaluated_obj = obj.evaluated_get(depsgraph)
+                mesh = evaluated_obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
         else:
             mesh = obj.data.copy()
         bm = bmesh.new()

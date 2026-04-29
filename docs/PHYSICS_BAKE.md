@@ -169,7 +169,7 @@ It borrows ideas from real-time physically based animation without running a hea
 
 - The baked motion is exported through the active `Action` timeline and recorded clip ranges, with NLA still supported for manual advanced workflows.
 - Generated GOH physics actions under a legacy mirrored imported `basis` are mirror-corrected at ANM export time. The source recoil object is left unchanged, and ordinary hand-keyed actions are not flipped just because an object has link-role metadata.
-- For new GOH-native imports, keep `Defer Basis Flip` disabled when you need Blender to match SOEdit/game helper placement exactly. Enable it only for legacy non-mirrored editing scenes; ANM import and export both apply the matching basis handness compensation in that mode.
+- For new GOH-native imports, keep `Defer Basis Flip` enabled when you need Blender to match SOEdit/game helper placement while preserving the mirrored source basis for export. Disable it only when you intentionally need to inspect the raw mirrored file-space parent; ANM import and export both apply the matching basis handedness compensation in the default display mode.
 - Mesh ripple is exported through the existing mesh-animation path.
 - For GOH use, keep the motion short and readable.
 - If one animation must cover many fire directions, create separate directional clips such as `fire_front`, `fire_left`, `fire_right`, or bake each turret direction separately.

@@ -141,12 +141,15 @@ def _assert_animation_does_not_break_mirrored_basis() -> None:
     basis = bpy.data.objects.get("basis") or bpy.data.objects.get("Basis")
     if basis is None:
         raise RuntimeError("m60a1 import did not create basis object.")
-    rest_values = basis.get("goh_rest_matrix_local")
-    if rest_values is None:
+    rest_matrix = _stored_rest_local_matrix(basis)
+    if rest_matrix is None:
         raise RuntimeError("basis object is missing stored GOH rest matrix.")
-    rest_det = _determinant(basis)
+    rest_det = rest_matrix.to_3x3().determinant()
     if rest_det >= -1e-5:
-        raise RuntimeError(f"basis rest determinant is not mirrored before animation: {rest_det:g}")
+        raise RuntimeError(f"stored GOH basis determinant is not mirrored before animation: {rest_det:g}")
+    display_det = _determinant(basis)
+    if display_det <= 1e-5 or not basis.get("goh_deferred_basis_flip"):
+        raise RuntimeError(f"basis display determinant is not game-matching before animation: {display_det:g}")
 
     baseline_positions = {}
     for name in ("body", "turret", "gun_rot", "gun"):
@@ -183,8 +186,8 @@ def _assert_animation_does_not_break_mirrored_basis() -> None:
         for frame in (1, 10, 50, 100):
             bpy.context.scene.frame_set(frame)
             det = _determinant(basis)
-            if det >= -1e-5:
-                raise RuntimeError(f"{anm_name} frame {frame} changed mirrored basis determinant to {det:g}.")
+            if det <= 1e-5:
+                raise RuntimeError(f"{anm_name} frame {frame} changed deferred basis display determinant to {det:g}.")
 
 
 def _assert_imported_geometry() -> None:
@@ -221,6 +224,7 @@ def main() -> None:
             import_volumes=True,
             import_shapes=True,
             import_lod0_only=True,
+            defer_basis_flip=True,
         )
         if "FINISHED" not in result:
             raise RuntimeError(f"m60a1 import failed: {result}")

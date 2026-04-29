@@ -15,7 +15,7 @@ class GOHModelImporter:
         self.input_dir = self.input_path.parent
         self.axis_rotation = self._axis_rotation_matrix(operator.axis_mode)
         self.scale_factor = operator.scale_factor
-        self.defer_basis_flip = bool(getattr(operator, "defer_basis_flip", False))
+        self.defer_basis_flip = bool(getattr(operator, "defer_basis_flip", True))
         self.warnings: list[str] = []
         self.material_cache: dict[str, bpy.types.Material] = {}
         self.bone_objects: dict[str, bpy.types.Object] = {}

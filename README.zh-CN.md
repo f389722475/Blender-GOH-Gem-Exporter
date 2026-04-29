@@ -6,7 +6,7 @@
 
 它的目标不是简单复刻 3ds Max MultiScript，而是在 Blender 里提供更现代、更结构化的 GOH 模型、碰撞、材质、动画和物理烘焙工作流。
 
-当前发布版本：`1.4.0`。
+当前发布版本：`1.4.1`。
 
 ## 主要功能
 
@@ -23,15 +23,15 @@
 - 支持 LOD 文件列表、包围盒碰撞辅助体、后坐力动作、方向射击动画、一键物理联结烘焙
 - 支持从选中模型自动生成闭合、流形、全四边形碰撞 cage，使用内置 topology-first Quad Cage Fitter；车身和炮塔类大部件会自动使用沿长度采样的 Loft Cage
 - `.mdl` 导入会把 EPLY 法线写入 Blender custom split normals，恢复炮管、轮子、曲面装甲等位置的原始平滑效果
-- 默认 `.mdl` 导入保持 GOH `basis` 的原始镜像层级，让 Blender 视图和 SOEdit / 游戏内层级姿态一致；旧的非镜像编辑方式仍可手动启用 `Defer Basis Flip`
+- 默认 `.mdl` 导入会把 GOH 镜像 `basis` 延迟为和游戏一致的 Blender 显示空间，同时保留原始 GOH rest matrix 供导出恢复；`.anm` 导入和导出共用同一套手性补偿
 
 ## 推荐安装
 
 正式发布包里有两个 zip：
 
-- `blender_goh_gem_exporter-1.4.0.zip`
+- `blender_goh_gem_exporter-1.4.1.zip`
   Blender 插件安装包，推荐在 Blender 里直接安装这个文件。
-- `blender_goh_gem_exporter-1.4.0-full.zip`
+- `blender_goh_gem_exporter-1.4.1-full.zip`
   完整源码、文档、测试和示例素材快照，适合 GitHub 发布页或二次开发。
 
 安装步骤：
@@ -39,7 +39,7 @@
 1. 打开 Blender。
 2. 进入 `Edit > Preferences > Add-ons`。
 3. 点击 `Install...`。
-4. 选择 `blender_goh_gem_exporter-1.4.0.zip`。
+4. 选择 `blender_goh_gem_exporter-1.4.1.zip`。
 5. 启用 `GOH GEM Exporter`。
 
 ## Blender 面板
@@ -60,13 +60,13 @@
 推荐从完整 `.mdl` 导入开始：
 
 1. 使用 `Import GOH Model` 打开官方或已有模型。
-2. 保持源文件查看推荐设置：`Axis Conversion = None / GOH Native`、`Scale Factor = 20`、`Flip V = On`、`Defer Basis Flip = Off`。
+2. 保持游戏一致查看推荐设置：`Axis Conversion = None / GOH Native`、`Scale Factor = 20`、`Flip V = On`、`Defer Basis Flip = On`。
 3. 在 Blender 中编辑模型、材质、碰撞、辅助点位或动画。
 4. 用 `GOH Presets` 或自定义属性确认对象角色。
 5. 用 `Validate GOH Scene` 检查导出前常见问题。
 6. 用 `Export GOH Model` 导出回 GOH / SOEdit 可读取的资源。
 
-`Defer Basis Flip` 现在是显式的旧式编辑选项。启用时，Blender 里会显示不镜像的编辑父级；导入和导出 `.anm` 时插件都会把位移和旋转增量经过同一套手性补偿，包括第 8 帧这类车体俯仰方向，避免 Blender 下仰而 SOEdit / 游戏内上仰。
+`Defer Basis Flip` 现在是 GOH 原生模型的默认推荐项。启用时，Blender 里显示和 SOEdit / 游戏一致的不镜像父级，但插件仍保存原始镜像 `basis` 给导出使用；导入和导出 `.anm` 时位移、旋转增量会经过同一套手性补偿，避免 Blender 与游戏内俯仰方向相反。只有在需要检查原始镜像文件空间时才关闭它。
 
 ## 动画组和 ANM
 

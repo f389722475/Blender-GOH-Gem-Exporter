@@ -76,7 +76,7 @@ from .presets import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
-GOH_ADDON_VERSION = "1.4.0"
+GOH_ADDON_VERSION = "1.4.1"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),
@@ -346,8 +346,16 @@ class GOHBasisSettings(PropertyGroup):
         description="Custom entity path prefix used when Entity Path is set to Custom",
         default="entity/",
     )
-    wheel_radius: FloatProperty(name="Wheelradius", default=0.48, min=0.0, soft_max=100.0)
-    steer_max: FloatProperty(name="SteerMax", default=28.0, min=0.0, soft_max=360.0)
+    wheel_radius: FloatProperty(
+        name="Wheelradius",
+        description="Legacy Basis Wheelradius value. Accepts any numeric value for source-faithful templates.",
+        default=0.48,
+    )
+    steer_max: FloatProperty(
+        name="SteerMax",
+        description="Legacy Basis SteerMax value. Accepts any numeric value for source-faithful templates.",
+        default=28.0,
+    )
     animation_enabled: BoolProperty(name="Legacy Animation Clips", default=False)
     start_enabled: BoolProperty(name="Start", default=False)
     start_range: StringProperty(name="Start Range", default="")
@@ -1015,8 +1023,14 @@ def _apply_goh_preset_to_object(
 ) -> str:
     role_preset = GOH_ROLE_PRESET_MAP[settings.role]
     part_preset = _resolve_part_preset(settings.role, settings.part, settings.template_family)
-    display_name = _numbered_display_name(part_preset.display_name, role_preset.name_suffix, index, settings.auto_number)
-    export_name = _numbered_identifier(part_preset.export_name, index, settings.auto_number)
+    display_name = _numbered_display_name(
+        part_preset.display_name,
+        role_preset.name_suffix,
+        index,
+        settings.auto_number,
+        part_preset.numbering,
+    )
+    export_name = _numbered_identifier(part_preset.export_name, index, settings.auto_number, part_preset.numbering)
     target_override = settings.target_name.strip()
     target_name = target_override or export_name
 
@@ -1102,8 +1116,8 @@ class EXPORT_SCENE_OT_goh_model(Operator, ExportHelper):
     anm_format: EnumProperty(
         name="ANM Format",
         items=(
-            ("AUTO", "Auto", "Prefer FRM2 (0x00060000) and fall back to legacy FRMN when needed"),
-            ("FRM2", "FRM2", "Write compact FRM2 animation chunks with version 0x00060000"),
+            ("AUTO", "Auto", "Write SOEdit-friendly transform FRM2 clips and fall back to legacy FRMN when needed"),
+            ("FRM2", "FRM2", "Write FRM2 0x00060000 clips and include mesh animation chunks when present"),
             ("LEGACY", "Legacy", "Write the older FRMN/BONE/MATR/VISI format with version 0x00040000"),
         ),
         default="AUTO",
@@ -1176,8 +1190,8 @@ class IMPORT_SCENE_OT_goh_model(Operator, ImportHelper):
     import_lod0_only: BoolProperty(name="LOD0 Only", default=True)
     defer_basis_flip: BoolProperty(
         name="Defer Basis Flip",
-        description="Show imported GOH basis bones without the mirror transform in Blender, but keep the stored GOH basis for export",
-        default=False,
+        description="Display mirrored GOH basis imports like they appear in-game, while preserving the original basis for export",
+        default=True,
     )
 
     def draw(self, _context: bpy.types.Context) -> None:
@@ -2491,7 +2505,7 @@ class VIEW3D_PT_goh_export_help(Panel):
         layout.label(text="预设 GOH Presets 用结构化字段替代旧版 Max 文本模板。", translate=False)
         layout.label(text="骨架 Armature + 顶点组 Vertex Groups 可导出 skinned PLY。", translate=False)
         layout.label(text="动作 Action / NLA strips 可导出 ANM 与 shape-key mesh chunks。", translate=False)
-        layout.label(text=f"SOEdit / Max round-trip 推荐使用 Axis=None、Scale={int(GOH_NATIVE_SCALE)}、Flip V=On。", translate=False)
+        layout.label(text=f"SOEdit / Max round-trip 推荐使用 Axis=None、Scale={int(GOH_NATIVE_SCALE)}、Flip V=On、Defer Basis Flip=On。", translate=False)
 
 
 def menu_func_export(self, _context):

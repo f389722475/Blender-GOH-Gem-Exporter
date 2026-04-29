@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 1.4.1 - 2026-04-29
+
+### Fixed
+
+- Changed default GOH-native `.mdl` import display to defer mirrored root `basis` transforms, so Blender shows the same model handedness and helper placement expected in SOEdit/game while preserving the original mirrored basis metadata for export.
+- Fixed ANM import for deferred root `basis` clips that include their own coordinate-frame marker, preventing parent-space flips from moving the whole vehicle away from the imported rest pose.
+- Kept mirrored-basis ANM export correction aligned with the new import default, so Blender-authored recoil/body pitch exports back into GOH mirrored animation space.
+
+### Verified
+
+- Imported the GitHub issue #3 GOH tanks sample pack; all GOH vanilla samples now import with non-mirrored Blender display `basis` and preserved mirrored GOH rest metadata.
+- Imported the issue #3 AS2 sample packs to confirm root-basis mirroring is covered; models with additional nested mirrored child bones remain tracked as a separate compatibility case.
+- Ran T26E4 official `fire.anm`, M60A1 import/material/animation, `tests/3.blend` export, Blender runtime, smoke, and random vehicle import regressions.
+
 ## 1.4.0 - 2026-04-29
 
 ### Added

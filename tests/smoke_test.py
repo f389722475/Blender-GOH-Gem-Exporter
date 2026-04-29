@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ADDON_DIR = ROOT / "blender_goh_gem_exporter"
 sys.path.insert(0, str(ADDON_DIR))
 
+from core.names import numbered_identifier  # noqa: E402
 from goh_core import (  # noqa: E402
     AnimationFile,
     MeshAnimationState,
@@ -37,6 +38,11 @@ from goh_core import (  # noqa: E402
     write_animation,
     write_export_bundle,
     write_mesh,
+)
+from presets import (  # noqa: E402
+    GOH_PART_PRESET_MAP,
+    GOH_TEMPLATE_FAMILY_ITEMS,
+    GOH_TEMPLATE_ROLE_PART_KEYS,
 )
 
 
@@ -368,6 +374,41 @@ def build_bundle() -> ExportBundle:
 
 
 def main() -> None:
+    template_families = {key for key, _label, _description in GOH_TEMPLATE_FAMILY_ITEMS}
+    assert {"AIRCRAFT", "STUFF"} <= template_families
+    for key in (
+        "body_back",
+        "trackleft",
+        "trackright",
+        "propeller",
+        "wingleft",
+        "wingright",
+        "stuff_weapon",
+        "part_big",
+        "part_auto",
+        "emit_lower_auto",
+        "seat01_auto",
+        "wheell1_auto",
+        "wheelsl_optional_auto",
+        "fxfire_auto",
+        "headlightl",
+        "fx_trace_game_l1",
+        "fx_tracem1",
+    ):
+        assert key in GOH_PART_PRESET_MAP
+    assert GOH_PART_PRESET_MAP["wheel_l_mixed_auto"].numbering == "optional_first"
+    assert numbered_identifier("wheelL", 1, True, "optional_first") == "wheelL1"
+    assert numbered_identifier("wheelsl", 2, True, "optional_first") == "wheelsl2"
+    assert numbered_identifier("seat01", 1, True) == "seat02"
+    assert "emit_lower_auto" in GOH_TEMPLATE_ROLE_PART_KEYS["TANK"]["attachment"]
+    assert "trackleft" in GOH_TEMPLATE_ROLE_PART_KEYS["TANK"]["volume"]
+    assert "wheell1_auto" in GOH_TEMPLATE_ROLE_PART_KEYS["CAR"]["volume"]
+    assert "wingright2_top" in GOH_TEMPLATE_ROLE_PART_KEYS["AIRCRAFT"]["visual"]
+    assert "fxtracem_auto" in GOH_TEMPLATE_ROLE_PART_KEYS["AIRCRAFT"]["fx"]
+    assert "fx_tracem4" in GOH_TEMPLATE_ROLE_PART_KEYS["AIRCRAFT"]["fx"]
+    assert "part_auto" in GOH_TEMPLATE_ROLE_PART_KEYS["STUFF"]["visual"]
+    assert "stuff_weapon" in GOH_TEMPLATE_ROLE_PART_KEYS["STUFF"]["visual"]
+
     bundle = build_bundle()
     mesh_stride = bundle.animations["idle_open.anm"].mesh_frames[0]["body"].vertex_stride
     animated_blob = bundle.animations["idle_open.anm"].mesh_frames[1]["body"].vertex_data

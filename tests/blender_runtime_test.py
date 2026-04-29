@@ -67,8 +67,8 @@ def main() -> None:
         basis_settings.vehicle_name = "runtime_test_vehicle"
         basis_settings.entity_type = "GAME_ENTITY"
         basis_settings.entity_path = "TANK_MEDIUM"
-        basis_settings.wheel_radius = 0.52
-        basis_settings.steer_max = 31.0
+        basis_settings.wheel_radius = -0.52
+        basis_settings.steer_max = -31.0
         basis_settings.animation_enabled = True
         basis_settings.start_enabled = True
         basis_settings.start_range = "1-10"
@@ -85,8 +85,16 @@ def main() -> None:
             raise RuntimeError("Basis helper was not created.")
         if "Type=Game_Entity" not in str(basis_helper.get("goh_legacy_props") or ""):
             raise RuntimeError("Basis helper did not store the expected legacy Type line.")
+        if "Wheelradius=-0.52" not in str(basis_helper.get("goh_legacy_props") or ""):
+            raise RuntimeError("Basis helper clamped or omitted a negative Wheelradius value.")
+        if "SteerMax=-31" not in str(basis_helper.get("goh_legacy_props") or ""):
+            raise RuntimeError("Basis helper clamped or omitted a negative SteerMax value.")
         if basis_helper.get("Model") != "entity/-vehicle/tank_medium/runtime_test_vehicle":
             raise RuntimeError("Basis helper did not store the expected Model metadata.")
+        if abs(float(basis_helper.get("Wheelradius")) + 0.52) > 1e-6:
+            raise RuntimeError("Basis helper metadata did not preserve arbitrary Wheelradius values.")
+        if abs(float(basis_helper.get("SteerMax")) + 31.0) > 1e-6:
+            raise RuntimeError("Basis helper metadata did not preserve arbitrary SteerMax values.")
         basis_helper["goh_legacy_props"] = str(basis_helper.get("goh_legacy_props") or "") + "\nAnimationAuto=auto_idle, auto_idle, 21-25, 60"
 
         preset_settings = scene.goh_preset_settings
@@ -881,6 +889,7 @@ def main() -> None:
             scale_factor=20.0,
             flip_v=True,
             export_animations=True,
+            anm_format="FRM2",
         )
         if "FINISHED" not in antenna_probe_result:
             raise RuntimeError(f"Antenna Whip export probe failed: {antenna_probe_result}")
@@ -1148,6 +1157,41 @@ def main() -> None:
         if marker.name != "Emit1" or marker.get("goh_attach_bone") != "body":
             raise RuntimeError("Attachment preset did not assign goh_attach_bone.")
 
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(4.0, 3.0, 0.0))
+        emit_auto_a = bpy.context.active_object
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(4.5, 3.0, 0.0))
+        emit_auto_b = bpy.context.active_object
+        bpy.ops.object.select_all(action="DESELECT")
+        emit_auto_a.select_set(True)
+        emit_auto_b.select_set(True)
+        bpy.context.view_layer.objects.active = emit_auto_a
+        preset_settings.template_family = "TANK"
+        preset_settings.role = "attachment"
+        preset_settings.part = "emit_lower_auto"
+        preset_settings.target_name = ""
+        result = bpy.ops.object.goh_apply_preset()
+        if "FINISHED" not in result:
+            raise RuntimeError(f"Lowercase emit auto preset failed: {result}")
+        if {emit_auto_a.name, emit_auto_b.name} != {"emit1", "emit2"}:
+            raise RuntimeError("Lowercase emit auto preset did not generate emit1/emit2.")
+
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(5.0, 3.0, 0.0))
+        wheel_auto_a = bpy.context.active_object
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(5.5, 3.0, 0.0))
+        wheel_auto_b = bpy.context.active_object
+        bpy.ops.object.select_all(action="DESELECT")
+        wheel_auto_a.select_set(True)
+        wheel_auto_b.select_set(True)
+        bpy.context.view_layer.objects.active = wheel_auto_a
+        preset_settings.template_family = "CANNON"
+        preset_settings.role = "attachment"
+        preset_settings.part = "wheel_l_mixed_auto"
+        result = bpy.ops.object.goh_apply_preset()
+        if "FINISHED" not in result:
+            raise RuntimeError(f"Optional-first wheel auto preset failed: {result}")
+        if {wheel_auto_a.name, wheel_auto_b.name} != {"wheelL", "wheelL1"}:
+            raise RuntimeError("Optional-first wheel auto preset did not generate wheelL/wheelL1.")
+
         bpy.ops.object.select_all(action="DESELECT")
         legacy_handle.select_set(True)
         bpy.context.view_layer.objects.active = legacy_handle
@@ -1190,6 +1234,7 @@ def main() -> None:
             selection_only=True,
             include_hidden=False,
             axis_mode="NONE",
+            anm_format="FRM2",
         )
         if "FINISHED" not in result:
             raise RuntimeError(f"Export failed: {result}")
@@ -1496,6 +1541,58 @@ def main() -> None:
             del basis_probe_basis["goh_deferred_basis_flip"]
         basis_probe_basis.matrix_world = goh_basis_matrix
         basis_probe_child.matrix_local = Matrix.Translation((1.0, 2.0, 3.0))
+        common_animation_dir = basis_probe_dir / "mirrored_basis_animation"
+        common_animation_dir.mkdir(parents=True, exist_ok=True)
+        basis_probe_child.animation_data_clear()
+        basis_probe_child.rotation_mode = "XYZ"
+        scene.frame_set(1)
+        basis_probe_child.location = Vector((1.0, 2.0, 3.0))
+        basis_probe_child.rotation_euler = (0.0, 0.0, 0.0)
+        basis_probe_child.keyframe_insert(data_path="location", frame=1)
+        basis_probe_child.keyframe_insert(data_path="rotation_euler", frame=1)
+        scene.frame_set(2)
+        basis_probe_child.location = Vector((1.0, 1.5, 3.0))
+        basis_probe_child.rotation_euler = (0.0, -0.2, 0.0)
+        basis_probe_child.keyframe_insert(data_path="location", frame=2)
+        basis_probe_child.keyframe_insert(data_path="rotation_euler", frame=2)
+        if basis_probe_child.animation_data and basis_probe_child.animation_data.action:
+            basis_probe_child.animation_data.action.name = "manual_mirrored_basis_probe"
+        bpy.ops.object.select_all(action="DESELECT")
+        basis_probe_basis.select_set(True)
+        basis_probe_child.select_set(True)
+        bpy.context.view_layer.objects.active = basis_probe_child
+        common_animation_result = bpy.ops.export_scene.goh_model(
+            filepath=str(common_animation_dir / "mirrored_basis_animation_probe.mdl"),
+            selection_only=True,
+            include_hidden=True,
+            axis_mode="NONE",
+            scale_factor=20.0,
+            export_animations=True,
+        )
+        if "FINISHED" not in common_animation_result:
+            raise RuntimeError(f"Mirrored basis animation export failed: {common_animation_result}")
+        common_animation = None
+        common_delta_y = None
+        common_pitch_marker = None
+        for animation_path in common_animation_dir.glob("*.anm"):
+            candidate = read_animation(animation_path)
+            if "body" not in candidate.bone_names or len(candidate.frames) < 2:
+                continue
+            delta = candidate.frames[-1]["body"].matrix[3][1] - candidate.frames[0]["body"].matrix[3][1]
+            if abs(delta) > 1.0:
+                common_animation = candidate
+                common_delta_y = delta
+                common_pitch_marker = candidate.frames[-1]["body"].matrix[0][2]
+                break
+        if common_animation is None:
+            raise RuntimeError("Mirrored basis animation export did not produce an ANM probe.")
+        if common_delta_y is None or common_delta_y <= 0.0:
+            raise RuntimeError("Mirrored basis animation did not convert Blender-visible translation for GOH playback.")
+        if common_pitch_marker is None or common_pitch_marker <= 0.05:
+            raise RuntimeError("Mirrored basis animation did not invert the exported pitch delta for GOH playback.")
+        basis_probe_child.animation_data_clear()
+        basis_probe_child.location = Vector((1.0, 2.0, 3.0))
+        basis_probe_child.rotation_euler = (0.0, 0.0, 0.0)
         mirror_probe_dir = basis_probe_dir / "mirrored_physics"
         mirror_probe_dir.mkdir(parents=True, exist_ok=True)
         mirror_probe_mesh = bpy.data.meshes.new("mirror_physics_probe_mesh")
@@ -1562,9 +1659,9 @@ def main() -> None:
                     break
         if mirror_animation is None:
             raise RuntimeError("Mirrored physics export probe did not write the source/link animation.")
-        if source_delta_y <= 0.0:
-            raise RuntimeError("Mirrored physics export changed the source recoil direction unexpectedly.")
-        if link_delta_y >= 0.0 or abs(abs(link_delta_y) - abs(source_delta_y)) > 0.05:
+        if source_delta_y >= 0.0:
+            raise RuntimeError("Mirrored physics export did not convert the source recoil into GOH mirrored space.")
+        if link_delta_y <= 0.0 or abs(abs(link_delta_y) - abs(source_delta_y)) > 0.05:
             raise RuntimeError("Mirrored physics link role animation was not reflected at export time.")
         bpy.data.objects.remove(mirror_source, do_unlink=True)
         bpy.data.objects.remove(mirror_link, do_unlink=True)

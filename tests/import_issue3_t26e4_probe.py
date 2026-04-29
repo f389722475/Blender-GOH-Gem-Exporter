@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 import bpy
+from mathutils import Matrix
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,9 +16,15 @@ if str(ADDON_PARENT) not in sys.path:
 import blender_goh_gem_exporter as addon  # noqa: E402
 
 
-T26E4_MODEL = Path(
-    r"D:\Steam\steamapps\common\Call to Arms - Gates of Hell\resource\entity\-vehicle\usa\tank_heavy\t26e4\t26e4.mdl"
+T26E4_MODEL_CANDIDATES = (
+    Path(
+        r"D:\Steam\steamapps\common\Call to Arms - Gates of Hell\resource\!!!codex learning\entity\-vehicle\usa\tank_heavy\t26e4\t26e4.mdl"
+    ),
+    Path(
+        r"D:\Steam\steamapps\common\Call to Arms - Gates of Hell\resource\entity\-vehicle\usa\tank_heavy\t26e4\t26e4.mdl"
+    ),
 )
+T26E4_MODEL = next((path for path in T26E4_MODEL_CANDIDATES if path.exists()), T26E4_MODEL_CANDIDATES[0])
 
 
 def _assert_finite_matrix(obj: bpy.types.Object) -> None:
@@ -86,10 +93,17 @@ def main() -> None:
             preview = ", ".join(flat_polygons[:8])
             raise RuntimeError(f"T26E4 meshes contain flat polygons after custom normal import: {preview}")
 
-        deferred_basis = [obj.name for obj in imported_objects if obj.get("goh_deferred_basis_flip")]
-        if deferred_basis:
-            preview = ", ".join(deferred_basis[:8])
-            raise RuntimeError(f"Default T26E4 import unexpectedly deferred the basis flip: {preview}")
+        basis = next((obj for obj in imported_objects if obj.get("goh_bone_name") == "basis"), None)
+        if basis is None or not basis.get("goh_deferred_basis_flip"):
+            raise RuntimeError("Default T26E4 import did not defer the mirrored basis for game-matching Blender display.")
+        if basis.matrix_world.to_3x3().determinant() < 0.0:
+            raise RuntimeError("Default T26E4 import still displays a mirrored basis in Blender.")
+        rest_values = basis.get("goh_rest_matrix_local")
+        if rest_values is None:
+            raise RuntimeError("Default T26E4 import did not keep the original GOH basis matrix for export.")
+        rest_matrix = Matrix((rest_values[0:4], rest_values[4:8], rest_values[8:12], rest_values[12:16]))
+        if rest_matrix.to_3x3().determinant() >= 0.0:
+            raise RuntimeError("Default T26E4 import lost the original mirrored GOH basis metadata.")
 
         for obj in imported_objects:
             _assert_finite_matrix(obj)
