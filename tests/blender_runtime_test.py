@@ -149,6 +149,8 @@ def main() -> None:
         material["goh_lightmap_options"] = "MipMap 1"
         material["goh_parallax_scale"] = 1.25
         material["goh_full_specular"] = True
+        material["goh_blend"] = "blend"
+        material["goh_import_mtl"] = "body.mtl"
         cube.data.materials.clear()
         cube.data.materials.append(material)
 
@@ -1175,6 +1177,34 @@ def main() -> None:
         if {emit_auto_a.name, emit_auto_b.name} != {"emit1", "emit2"}:
             raise RuntimeError("Lowercase emit auto preset did not generate emit1/emit2.")
 
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(4.75, 3.0, 0.0))
+        emit_auto_c = bpy.context.active_object
+        bpy.ops.object.select_all(action="DESELECT")
+        emit_auto_c.select_set(True)
+        bpy.context.view_layer.objects.active = emit_auto_c
+        result = bpy.ops.object.goh_apply_preset()
+        if "FINISHED" not in result:
+            raise RuntimeError(f"Lowercase emit conflict preset failed: {result}")
+        if emit_auto_c.name != "emit3" or emit_auto_c.get("goh_bone_name") != "emit3":
+            raise RuntimeError("Lowercase emit auto preset did not skip existing emit1/emit2 names.")
+
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(4.0, 3.5, 0.0))
+        seat_auto_a = bpy.context.active_object
+        bpy.ops.object.empty_add(type="PLAIN_AXES", location=(4.5, 3.5, 0.0))
+        seat_auto_b = bpy.context.active_object
+        bpy.ops.object.select_all(action="DESELECT")
+        seat_auto_a.select_set(True)
+        seat_auto_b.select_set(True)
+        bpy.context.view_layer.objects.active = seat_auto_a
+        preset_settings.part = "seat01_auto"
+        preset_settings.numbering_rule = "PAD2"
+        result = bpy.ops.object.goh_apply_preset()
+        if "FINISHED" not in result:
+            raise RuntimeError(f"Padded seat auto preset failed: {result}")
+        if {seat_auto_a.name, seat_auto_b.name} != {"seat01", "seat02"}:
+            raise RuntimeError("Padded seat auto preset did not generate seat01/seat02.")
+        preset_settings.numbering_rule = "PLAIN"
+
         bpy.ops.object.empty_add(type="PLAIN_AXES", location=(5.0, 3.0, 0.0))
         wheel_auto_a = bpy.context.active_object
         bpy.ops.object.empty_add(type="PLAIN_AXES", location=(5.5, 3.0, 0.0))
@@ -1254,9 +1284,14 @@ def main() -> None:
         unexpected_volume_files = [path.name for path in (output_dir / "engine.vol", output_dir / "detail.vol", output_dir / "fuel.vol") if path.exists()]
         if unexpected_volume_files:
             raise RuntimeError(f"Primitive volumes should not create .vol files: {unexpected_volume_files}")
-        material_files = list(output_dir.glob("*.mtl"))
+        material_files = sorted(output_dir.glob("*.mtl"))
         if not material_files:
             raise RuntimeError("No material file was exported.")
+        material_file_names = [path.name for path in material_files]
+        if "body.mtl" not in material_file_names:
+            raise RuntimeError(f"Imported material source name was not preserved: {material_file_names}")
+        if any(name.endswith(".001.mtl") or ".001." in name for name in material_file_names):
+            raise RuntimeError(f"Export created Blender duplicate material file names: {material_file_names}")
         mdl_text = (output_dir / "runtime_test.mdl").read_text(encoding="utf-8")
         if ";Basis Type=Game_Entity" not in mdl_text or ";Basis Model=entity/-vehicle/tank_medium/runtime_test_vehicle" not in mdl_text:
             raise RuntimeError("Basis metadata comments were not written into runtime_test.mdl.")
@@ -1282,9 +1317,26 @@ def main() -> None:
             raise RuntimeError("Legacy Max text properties were not converted into GOH bone limits/speed.")
         if '{Bone "handle"' not in mdl_text:
             raise RuntimeError("Weapon helper tool output was not exported into runtime_test.mdl.")
-        mtl_text = material_files[0].read_text(encoding="utf-8")
+        mtl_text = (output_dir / "body.mtl").read_text(encoding="utf-8")
+        if "{blend none}" not in mtl_text:
+            raise RuntimeError("Export did not force the selected material blend preset to blend none.")
         if '{lightmap "body_mask" {MipMap 1}}' not in mtl_text or "{parallax_scale 1.25}" not in mtl_text:
             raise RuntimeError("Extended material parameters were not written into the .mtl file.")
+        repeat_result = bpy.ops.export_scene.goh_model(
+            filepath=str(output_file),
+            selection_only=True,
+            include_hidden=False,
+            axis_mode="NONE",
+            anm_format="FRM2",
+            material_blend="none",
+        )
+        if "FINISHED" not in repeat_result:
+            raise RuntimeError(f"Repeat export failed: {repeat_result}")
+        repeat_material_file_names = sorted(path.name for path in output_dir.glob("*.mtl"))
+        if "body.mtl" not in repeat_material_file_names:
+            raise RuntimeError(f"Repeat export lost the original material filename: {repeat_material_file_names}")
+        if any(name.endswith(".001.mtl") or ".001." in name for name in repeat_material_file_names):
+            raise RuntimeError(f"Repeat export created Blender duplicate material file names: {repeat_material_file_names}")
         import_result = bpy.ops.import_scene.goh_model(
             filepath=str(output_file),
             axis_mode="NONE",

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 1.4.2 - 2026-04-30
+
+### Added
+
+- Added a GOH preset numbering rule selector for Auto presets, with `x1, x2` and `x01, x02` formats.
+- Added an export-side material blend preset selector for `blend none`, `blend test`, and `blend blend`.
+
+### Fixed
+
+- Fixed Auto GOH presets so generated names reserve real GOH identifiers instead of letting Blender create `.001` object suffixes.
+- Fixed legacy/broken Auto preset data repair coverage for saved `tests/3.blend`, including duplicate `Emit1` helper metadata.
+- Fixed material export naming so imported `.mtl` source names are preserved and repeat exports overwrite stable filenames instead of creating `*.001.mtl` variants.
+
+### Verified
+
+- Ran Python compile and addon smoke tests.
+- Ran the Blender runtime regression.
+- Ran the saved `tests/3.blend` Auto/FRM2 export regression.
+- Probed the saved `tests/3.blend` Emit Auto preset path and confirmed `Emit1/Emit2/Emit3/Emit4` GOH names.
+
 ## 1.4.1 - 2026-04-29
 
 ### Fixed

@@ -33,6 +33,40 @@ def _load_probe_file() -> None:
         bpy.ops.wm.open_mainfile(filepath=str(BLEND_PATH))
 
 
+def _repair_legacy_emit_auto_names() -> None:
+    emit_objects = sorted(
+        [obj for obj in bpy.data.objects if obj.name.startswith("Emit1")],
+        key=lambda obj: obj.name.lower(),
+    )
+    if len(emit_objects) < 2:
+        return
+    if len({str(obj.get("goh_bone_name") or obj.name) for obj in emit_objects}) == len(emit_objects):
+        return
+
+    settings = bpy.context.scene.goh_preset_settings
+    settings.template_family = "GENERIC"
+    settings.role = "attachment"
+    settings.part = "emit_auto"
+    settings.target_name = ""
+    settings.rename_objects = True
+    settings.write_export_names = True
+    settings.auto_number = True
+    settings.numbering_rule = "PLAIN"
+    settings.clear_conflicts = True
+
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in emit_objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = emit_objects[0]
+    result = bpy.ops.object.goh_apply_preset()
+    if "FINISHED" not in result:
+        raise RuntimeError(f"Failed to repair legacy Emit* auto names in 3.blend: {result}")
+
+    generated = [str(obj.get("goh_bone_name") or obj.name) for obj in emit_objects]
+    if len(set(generated)) != len(generated) or any(".001" in name for name in generated):
+        raise RuntimeError(f"Legacy Emit* auto-name repair still produced duplicate names: {generated}")
+
+
 def _export_probe(output_dir: Path, *, anm_format: str) -> list[Path]:
     if output_dir.exists():
         shutil.rmtree(output_dir)
@@ -116,6 +150,7 @@ def main() -> None:
     _load_probe_file()
     addon.register()
     try:
+        _repair_legacy_emit_auto_names()
         auto_paths = _export_probe(OUTPUT_ROOT / "auto", anm_format="AUTO")
         auto_path, auto_animation = _animation_with_bones(auto_paths, "body", "antenna")
         if any(frame for animation_path in auto_paths for frame in read_animation(animation_path).mesh_frames):

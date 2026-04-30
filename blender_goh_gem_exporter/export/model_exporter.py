@@ -26,6 +26,7 @@ class GOHBlenderExporter:
         self.basis_helper = self._find_basis_helper_object()
         self.warnings: list[str] = []
         self.material_cache: dict[tuple[str, int], MaterialDef] = {}
+        self.material_file_names: dict[str, tuple[str, int]] = {}
         self.file_name_counts: dict[str, int] = {}
         self.bone_file_names: dict[str, str] = {}
         self.volume_file_names: dict[str, str] = {}
@@ -95,6 +96,7 @@ class GOHBlenderExporter:
                 "axis_mode": self.operator.axis_mode,
                 "scale_factor": float(self.scale_factor),
                 "flip_v": bool(self.operator.flip_v),
+                "material_blend": str(getattr(self.operator, "material_blend", "none") or "none"),
                 "export_animations": bool(self.operator.export_animations),
             },
             "warnings": list(self.warnings),
@@ -1828,10 +1830,37 @@ class GOHBlenderExporter:
             return self.material_cache[key]
 
         fallback_name = f"{obj.name}_{slot_index + 1}"
-        file_name = self._unique_file_name(material.name if material else fallback_name, ".mtl")
+        file_name = self._material_file_name(material, fallback_name, key)
         material_def = self._build_material_definition(material, file_name)
         self.material_cache[key] = material_def
         return material_def
+
+    def _material_file_name(
+        self,
+        material: bpy.types.Material | None,
+        fallback_name: str,
+        key: tuple[str, int],
+    ) -> str:
+        imported_name = self._custom_text(material, "goh_import_mtl") if material else None
+        raw_name = Path(imported_name).name if imported_name else (material.name if material else fallback_name)
+        raw_stem = Path(raw_name).stem if raw_name.lower().endswith(".mtl") else raw_name
+        raw_stem = re.sub(r"\.\d{3}$", "", raw_stem)
+        safe_stem = sanitized_file_stem(raw_stem)
+        file_name = f"{safe_stem}.mtl"
+        file_key = file_name.lower()
+        owner = self.material_file_names.get(file_key)
+        if owner is None or owner == key or imported_name:
+            self.material_file_names[file_key] = key
+            return file_name
+
+        counter = 2
+        while True:
+            fallback_file = f"{safe_stem}_{counter}.mtl"
+            fallback_key = fallback_file.lower()
+            if fallback_key not in self.material_file_names:
+                self.material_file_names[fallback_key] = key
+                return fallback_file
+            counter += 1
 
     def _build_material_definition(self, material: bpy.types.Material | None, file_name: str) -> MaterialDef:
         diffuse = self._custom_text(material, "goh_diffuse") if material else None
@@ -1860,7 +1889,11 @@ class GOHBlenderExporter:
             mask = mask or self._find_named_image(material, ("mask", "_msk"))
 
         shader = (shader or ("bump" if bump or specular else "simple")).lower()
-        blend = (blend or ("blend" if material and material.blend_method != "OPAQUE" else "none")).lower()
+        operator_blend = str(getattr(self.operator, "material_blend", "") or "").lower()
+        if operator_blend in {"none", "test", "blend"}:
+            blend = operator_blend
+        else:
+            blend = (blend or ("blend" if material and material.blend_method != "OPAQUE" else "none")).lower()
         color = color or (150, 150, 150, 25)
         if material and hasattr(material, "use_backface_culling") and not material.use_backface_culling:
             two_sided = True

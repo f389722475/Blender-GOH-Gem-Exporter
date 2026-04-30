@@ -6,7 +6,7 @@
 
 It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds Max GOH workflows while keeping the authoring experience Blender-native.
 
-Current release: `1.4.1`.
+Current release: `1.4.2`.
 
 ## Highlights
 
@@ -215,7 +215,7 @@ Compatibility rules:
 3. Select the zip file.
 4. Enable `GOH GEM Exporter`
 
-The official release asset is `blender_goh_gem_exporter-1.4.1.zip`.
+The official release asset is `blender_goh_gem_exporter-1.4.2.zip`.
 For a cleaner release-ready package, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Recommended Round-Trip Export Settings
@@ -255,6 +255,7 @@ python -X utf8 tests\smoke_test.py
 - [Detailed Plugin Guide - Chinese](docs/PLUGIN_GUIDE_ZH-CN.md)
 - [Physics Bake Workflow](docs/PHYSICS_BAKE.md)
 - [Official Max Plugin Compatibility Notes](docs/OFFICIAL_MAX_PLUGIN_NOTES.md)
+- [v1.4.2 Release Notes](docs/RELEASE_NOTES_v1.4.2.md)
 - [v1.4.1 Release Notes](docs/RELEASE_NOTES_v1.4.1.md)
 - [v1.4.0 Release Notes](docs/RELEASE_NOTES_v1.4.0.md)
 - [v1.3.2 Release Notes](docs/RELEASE_NOTES_v1.3.2.md)
