@@ -6,6 +6,8 @@ for _name, _value in _legacy.__dict__.items():
     if _name not in globals():
         globals()[_name] = _value
 
+from ..formats.humanskin import combine_skinned_meshes, has_humanskin_skeleton, import_plan_for_bone, mesh_views_for_import
+
 
 class GOHModelImporter:
     def __init__(self, context: bpy.types.Context, operator: "IMPORT_SCENE_OT_goh_model") -> None:
@@ -24,9 +26,11 @@ class GOHModelImporter:
         self.volume_collection: bpy.types.Collection | None = None
         self.obstacle_collection: bpy.types.Collection | None = None
         self.area_collection: bpy.types.Collection | None = None
+        self.use_humanskin_display_matrices = False
 
     def import_model(self) -> tuple[int, list[str]]:
         model = read_model(self.input_path)
+        self.use_humanskin_display_matrices = self.operator.axis_mode == "NONE" and has_humanskin_skeleton(model.basis)
         self.root_collection = self._ensure_child_collection(f"GOH_{self.input_path.stem}", self.context.scene.collection)
         if self.operator.import_volumes:
             self.volume_collection = self._ensure_child_collection("GOH_VOLUMES", self.root_collection)
@@ -49,15 +53,39 @@ class GOHModelImporter:
     def _import_bone_node(self, bone: BoneNode, parent: bpy.types.Object | None) -> bpy.types.Object:
         local_matrix = self._decode_matrix_rows(bone.matrix or self._identity_matrix_rows())
         defer_basis_flip = self._should_defer_basis_flip(bone, parent, local_matrix)
-        display_matrix = self._deferred_basis_display_matrix(local_matrix) if defer_basis_flip else local_matrix
-        views = list(bone.mesh_views)
+        display_matrix = self._display_matrix_for_bone(bone, local_matrix, defer_basis_flip)
+        views = list(mesh_views_for_import(bone, lod0_only=self.operator.import_lod0_only))
         if not views and bone.volume_view:
             views = [MeshViewDef(bone.volume_view, bone.volume_flags, bone.layer)]
-        if self.operator.import_lod0_only:
-            views = views[:1]
 
         primary: bpy.types.Object | None = None
-        for view_index, view in enumerate(views):
+        humanskin_plan = import_plan_for_bone(bone, lod0_only=self.operator.import_lod0_only)
+        if humanskin_plan is not None:
+            mesh_parts: list[MeshData] = []
+            source_refs: list[str] = []
+            for view in humanskin_plan.mesh_views:
+                if not view.file_name:
+                    continue
+                mesh_path = self._resolve_asset_path(view.file_name)
+                if mesh_path is None:
+                    self.warnings.append(f'Mesh "{view.file_name}" referenced by bone "{bone.name}" was not found.')
+                    continue
+                try:
+                    mesh_parts.append(read_mesh(mesh_path))
+                    source_refs.append(view.file_name)
+                except ExportError as exc:
+                    self.warnings.append(str(exc))
+            if mesh_parts:
+                mesh_data = combine_skinned_meshes(humanskin_plan.merged_file_name, mesh_parts)
+                primary = self._create_mesh_object(bone.name, mesh_data)
+                primary["goh_bone_name"] = bone.name
+                primary["goh_import_mesh"] = ";".join(source_refs)
+                primary["goh_humanskin_combined"] = True
+                primary["goh_humanskin_source_meshes"] = ";".join(source_refs)
+                self._set_parent_and_matrix(primary, parent, local_matrix, display_matrix=display_matrix)
+                self.bone_objects[bone.name] = primary
+
+        for view_index, view in enumerate([] if primary is not None and humanskin_plan is not None else views):
             if not view.file_name:
                 continue
             mesh_path = self._resolve_asset_path(view.file_name)
@@ -85,7 +113,7 @@ class GOHModelImporter:
         if primary is None:
             primary = bpy.data.objects.new(bone.name, None)
             primary.empty_display_type = "PLAIN_AXES"
-            primary.empty_display_size = 0.35
+            primary.empty_display_size = 0.08 if self.use_humanskin_display_matrices else 0.35
             primary["goh_bone_name"] = bone.name
             self._link_object(primary)
             self._set_parent_and_matrix(primary, parent, local_matrix, display_matrix=display_matrix)
@@ -122,6 +150,13 @@ class GOHModelImporter:
     def _deferred_basis_display_matrix(self, local_matrix: Matrix) -> Matrix:
         location = local_matrix.to_translation()
         return Matrix.Translation(location)
+
+    def _display_matrix_for_bone(self, bone: BoneNode, local_matrix: Matrix, defer_basis_flip: bool) -> Matrix:
+        if defer_basis_flip:
+            return self._deferred_basis_display_matrix(local_matrix)
+        if self.use_humanskin_display_matrices:
+            return self._decode_soedit_matrix_rows(bone.matrix or self._identity_matrix_rows())
+        return local_matrix
 
     def _create_mesh_object(self, object_name: str, mesh_data: MeshData) -> bpy.types.Object:
         vertices = [self._decode_point(vertex.position) for vertex in mesh_data.vertices]
@@ -213,11 +248,14 @@ class GOHModelImporter:
             if len(weights) < 4:
                 weights.append(max(0.0, 1.0 - sum(weights)))
             for slot, bone_index in enumerate(vertex.bone_indices[:4]):
-                if bone_index >= len(groups):
+                if bone_index <= 0:
+                    continue
+                group_index = bone_index - 1
+                if group_index >= len(groups):
                     continue
                 weight = weights[slot] if slot < len(weights) else 0.0
                 if weight > EPSILON:
-                    groups[bone_index].add([vertex_index], weight, "ADD")
+                    groups[group_index].add([vertex_index], weight, "ADD")
 
     def _import_volumes(self, volumes: list[VolumeData]) -> None:
         for volume in volumes:
@@ -643,6 +681,15 @@ class GOHModelImporter:
     def _decode_matrix_rows(self, matrix_rows: tuple[tuple[float, float, float], ...]) -> Matrix:
         axis3 = self.axis_rotation.to_3x3()
         rotation = Matrix((matrix_rows[0], matrix_rows[1], matrix_rows[2]))
+        converted_rotation = axis3.inverted() @ rotation @ axis3
+        location = axis3.inverted() @ Vector(matrix_rows[3])
+        if abs(self.scale_factor) > EPSILON:
+            location /= self.scale_factor
+        return Matrix.Translation(location) @ converted_rotation.to_4x4()
+
+    def _decode_soedit_matrix_rows(self, matrix_rows: tuple[tuple[float, float, float], ...]) -> Matrix:
+        axis3 = self.axis_rotation.to_3x3()
+        rotation = Matrix((matrix_rows[0], matrix_rows[1], matrix_rows[2])).transposed()
         converted_rotation = axis3.inverted() @ rotation @ axis3
         location = axis3.inverted() @ Vector(matrix_rows[3])
         if abs(self.scale_factor) > EPSILON:

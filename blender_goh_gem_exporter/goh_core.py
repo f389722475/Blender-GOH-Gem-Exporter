@@ -139,6 +139,7 @@ class BoneNode:
     volume_flags: tuple[str, ...] = ()
     layer: int | str | None = None
     mesh_views: list[MeshViewDef] = field(default_factory=list)
+    lod_view_groups: list[tuple[MeshViewDef, ...]] = field(default_factory=list)
     lod_off: bool = False
     sequences: list[SequenceDef] = field(default_factory=list)
     children: list["BoneNode"] = field(default_factory=list)
@@ -1144,14 +1145,20 @@ def _parse_bone_node(block: MdlBlock) -> BoneNode:
             except ValueError:
                 node.color_rgba = None
         elif key == "volumeview":
-            node.mesh_views.append(_parse_mesh_view(child))
+            mesh_view = _parse_mesh_view(child)
+            node.mesh_views.append(mesh_view)
+            node.lod_view_groups.append((mesh_view,))
         elif key == "lodview":
+            lod_group: list[MeshViewDef] = []
             for lod_child in _mdl_child_blocks(child):
                 lod_key = _mdl_block_key(lod_child)
                 if lod_key == "volumeview":
-                    node.mesh_views.append(_parse_mesh_view(lod_child))
+                    lod_group.append(_parse_mesh_view(lod_child))
                 elif lod_key == "off":
                     node.lod_off = True
+            if lod_group:
+                node.mesh_views.extend(lod_group)
+                node.lod_view_groups.append(tuple(lod_group))
         elif key == "bone":
             node.children.append(_parse_bone_node(child))
     if node.mesh_views:
@@ -1838,24 +1845,39 @@ def _write_bone(fp, indent: int, bone: BoneNode) -> None:
         _write_transform(fp, indent + 1, bone.matrix, block_mode=bone.transform_block)
     if bone.visibility is not None:
         _line(fp, indent + 1, f"{{Visibility {int(bone.visibility)}}}")
-    mesh_views = list(bone.mesh_views)
-    if not mesh_views and bone.volume_view:
-        mesh_views.append(
-            MeshViewDef(
-                file_name=bone.volume_view,
-                flags=bone.volume_flags,
-                layer=bone.layer,
-            )
-        )
-    if len(mesh_views) > 1 or bone.lod_off:
-        _line(fp, indent + 1, "{LODView")
-        for mesh_view in mesh_views:
-            _write_mesh_view(fp, indent + 2, mesh_view)
+    grouped_mesh_views = [tuple(group) for group in bone.lod_view_groups if group]
+    if grouped_mesh_views and (len(grouped_mesh_views) > 1 or any(len(group) > 1 for group in grouped_mesh_views)):
+        for group in grouped_mesh_views:
+            if len(group) > 1:
+                _line(fp, indent + 1, "{LODView")
+                for mesh_view in group:
+                    _write_mesh_view(fp, indent + 2, mesh_view)
+                _line(fp, indent + 1, "}")
+            else:
+                _write_mesh_view(fp, indent + 1, group[0])
         if bone.lod_off:
+            _line(fp, indent + 1, "{LODView")
             _line(fp, indent + 2, "{OFF}")
-        _line(fp, indent + 1, "}")
-    elif mesh_views:
-        _write_mesh_view(fp, indent + 1, mesh_views[0])
+            _line(fp, indent + 1, "}")
+    else:
+        mesh_views = list(bone.mesh_views)
+        if not mesh_views and bone.volume_view:
+            mesh_views.append(
+                MeshViewDef(
+                    file_name=bone.volume_view,
+                    flags=bone.volume_flags,
+                    layer=bone.layer,
+                )
+            )
+        if len(mesh_views) > 1 or bone.lod_off:
+            _line(fp, indent + 1, "{LODView")
+            for mesh_view in mesh_views:
+                _write_mesh_view(fp, indent + 2, mesh_view)
+            if bone.lod_off:
+                _line(fp, indent + 2, "{OFF}")
+            _line(fp, indent + 1, "}")
+        elif mesh_views:
+            _write_mesh_view(fp, indent + 1, mesh_views[0])
     for child in bone.children:
         _write_bone(fp, indent + 1, child)
     _line(fp, indent, "}")

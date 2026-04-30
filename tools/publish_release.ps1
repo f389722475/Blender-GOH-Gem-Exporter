@@ -84,7 +84,8 @@ function Invoke-Validation {
         $blenderTests = @(
             "tests\regression_t26e4_import_display_space.py",
             "tests\regression_m60a1_import.py",
-            "tests\regression_3blend_export.py"
+            "tests\regression_3blend_export.py",
+            "tests\regression_humanskin_import_export.py"
         )
         foreach ($test in $blenderTests) {
             if (Test-Path -LiteralPath (Join-Path $GitRoot $test)) {
@@ -120,7 +121,7 @@ function Invoke-UnencryptedBackup {
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $backupDir = Join-Path $UnlockRoot "v$Version`_unencrypted_source_$stamp"
     New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
-    robocopy $DevRoot $backupDir /E /XD .tools dist runtime_test_output .pytest_cache __pycache__ /XF *.pyc *.pyo *.zip | Out-Host
+    robocopy $DevRoot $backupDir /E /XD .tools dist runtime_test_output .pytest_cache __pycache__ _tmp_* /XF *.pyc *.pyo *.zip | Out-Host
     if ($LASTEXITCODE -gt 7) {
         throw "robocopy failed with exit code $LASTEXITCODE"
     }
@@ -195,7 +196,7 @@ if (-not $SkipCommit -and (Test-GitHasChanges)) {
 
 Push-Location -LiteralPath $GitRoot
 try {
-    git rev-parse --verify $tag *> $null
+    git show-ref --verify --quiet "refs/tags/$tag"
     if ($LASTEXITCODE -eq 0) {
         throw "Local tag already exists: $tag"
     }
@@ -217,7 +218,7 @@ if (-not $NoPush) {
 $existingRelease = $false
 Push-Location -LiteralPath $GitRoot
 try {
-    gh release view $tag --repo $Repo *> $null
+    gh release view $tag --repo $Repo --json tagName 1> $null 2> $null
     $existingRelease = ($LASTEXITCODE -eq 0)
 }
 finally {

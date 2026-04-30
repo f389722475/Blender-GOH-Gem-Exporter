@@ -169,6 +169,7 @@ class GOHBlenderExporter:
             )
             basis_node.children.append(child_node)
 
+        self.armature_bone_order = self._object_bone_order_for_weights(visual_objects, bone_name_map)
         meshes = self._build_mesh_map(attachments)
         self.animation_attachments = attachments
         volumes = self._build_volume_entries(volume_objects, bone_name_map, visual_objects)
@@ -1256,6 +1257,7 @@ class GOHBlenderExporter:
     ) -> MeshData | None:
         raw_sections: OrderedDict[str, list[tuple[RawLoopVertex, RawLoopVertex, RawLoopVertex]]] = OrderedDict()
         used_bones: set[str] = set()
+        fallback_bones: set[str] = set()
         any_weighted_vertices = False
 
         for attachment in attachments:
@@ -1267,6 +1269,8 @@ class GOHBlenderExporter:
                     for raw_vertex in triangle:
                         for bone_name, _weight in raw_vertex.influences:
                             used_bones.add(bone_name)
+                        if not raw_vertex.influences:
+                            fallback_bones.add(raw_vertex.fallback_bone or self.basis_name)
 
         if not raw_sections:
             return None
@@ -1274,7 +1278,8 @@ class GOHBlenderExporter:
         skinned = any_weighted_vertices
         if skinned:
             for attachment in attachments:
-                used_bones.add(attachment.attach_bone)
+                used_bones.update(self._preserved_skin_bones_for_object(attachment.obj))
+            used_bones.update(fallback_bones)
             ordered_skin_bones = self._ordered_skin_bones(used_bones)
             bone_index_map = {name: index + 1 for index, name in enumerate(ordered_skin_bones)}
             max_influences = 1
@@ -1814,6 +1819,34 @@ class GOHBlenderExporter:
                 ordered.append(bone_name)
         return ordered
 
+    def _object_bone_order_for_weights(
+        self,
+        visual_objects: set[bpy.types.Object],
+        bone_name_map: dict[bpy.types.Object, str],
+    ) -> list[str]:
+        object_bones = set(bone_name_map.values())
+        ordered: list[str] = []
+        for obj in sorted((item for item in visual_objects if item.type == "MESH"), key=lambda item: item.name.lower()):
+            for group in obj.vertex_groups:
+                group_name = group.name
+                if group_name in object_bones and group_name not in ordered:
+                    ordered.append(group_name)
+        for bone_name in bone_name_map.values():
+            if bone_name not in ordered:
+                ordered.append(bone_name)
+        return ordered
+
+    def _preserved_skin_bones_for_object(self, obj: bpy.types.Object) -> list[str]:
+        if not (self._custom_bool(obj, "goh_humanskin_combined") or self._custom_text(obj, "goh_import_ply")):
+            return []
+        valid_bones = set(self.armature_bone_order)
+        preserved: list[str] = []
+        for group in obj.vertex_groups:
+            group_name = group.name
+            if (group_name == self.basis_name or group_name in valid_bones) and group_name not in preserved:
+                preserved.append(group_name)
+        return preserved
+
     def material_cache_by_file(self, file_name: str) -> MaterialDef:
         for material in self.material_cache.values():
             if material.file_name == file_name:
@@ -2059,9 +2092,10 @@ class GOHBlenderExporter:
         vertex: bpy.types.MeshVertex,
         fallback_bone: str,
     ) -> tuple[tuple[str, float], ...]:
-        if self.armature_obj is None:
+        if self.armature_obj is None and not self.armature_bone_order:
             return ()
 
+        valid_bones = set(self.armature_bone_order)
         influences: list[tuple[str, float]] = []
         for group_element in vertex.groups:
             if group_element.weight <= EPSILON:
@@ -2069,7 +2103,7 @@ class GOHBlenderExporter:
             if group_element.group >= len(obj.vertex_groups):
                 continue
             group_name = obj.vertex_groups[group_element.group].name
-            if group_name == self.basis_name or group_name in self.armature_bone_order:
+            if group_name == self.basis_name or group_name in valid_bones:
                 influences.append((group_name, float(group_element.weight)))
 
         influences.sort(key=lambda item: item[1], reverse=True)

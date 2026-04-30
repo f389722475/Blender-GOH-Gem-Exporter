@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a GOH/GEM import, export, animation, material, or helper issue.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the Blender operation, source files, export settings, and SOEdit/game check if available.
+      placeholder: |
+        1. Import ...
+        2. Export ...
+        3. Open in SOEdit/game ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Screenshots, `.blend` files, `.mdl/.anm` samples, or logs are very helpful.
+    validations:
+      required: true
+  - type: input
+    id: addon-version
+    attributes:
+      label: Addon version
+      placeholder: "1.5.0"
+    validations:
+      required: true
+  - type: input
+    id: blender-version
+    attributes:
+      label: Blender version
+      placeholder: "5.1.1"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Extra notes
+      description: Mention whether the problem happens in Blender, SOEdit, game, or only after round-trip export.

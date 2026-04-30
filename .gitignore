@@ -10,6 +10,7 @@ runtime_test_output/
 refactor_audit/
 dist/
 release/
+tests/_tmp_*/
 .tools/
 *.zip
 

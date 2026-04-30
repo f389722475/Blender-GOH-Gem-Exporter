@@ -6,12 +6,13 @@
 
 它的目标不是简单复刻 3ds Max MultiScript，而是在 Blender 里提供更现代、更结构化的 GOH 模型、碰撞、材质、动画和物理烘焙工作流。
 
-当前发布版本：`1.4.2`。
+当前发布版本：`1.5.0`。
 
 ## 主要功能
 
 - 导出 `mdl`、`ply`、`mtl`、`vol`、`anm`
 - 导入完整 `.mdl` 模型用于查看和二次编辑
+- 通过独立 humanskin 模块导入 GOH 人物 `.mdl`
 - 导入 `.anm` 动画到已导入模型
 - `.mdl` 导入会恢复可视 mesh、Volume、Obstacle 和 Area 辅助对象
 - 支持普通模型、骨骼蒙皮模型、mesh animation 和 shape-key 网格动画
@@ -24,14 +25,15 @@
 - 支持从选中模型自动生成闭合、流形、全四边形碰撞 cage，使用内置 topology-first Quad Cage Fitter；车身和炮塔类大部件会自动使用沿长度采样的 Loft Cage
 - `.mdl` 导入会把 EPLY 法线写入 Blender custom split normals，恢复炮管、轮子、曲面装甲等位置的原始平滑效果
 - 默认 `.mdl` 导入会把 GOH 镜像 `basis` 延迟为和游戏一致的 Blender 显示空间，同时保留原始 GOH rest matrix 供导出恢复；`.anm` 导入和导出共用同一套手性补偿
+- humanskin 导入会把 LOD0 skin 片段合并成一个可编辑蒙皮网格，保留权重、自定义法线和平滑，并让骨骼点位/挂点以 SOEdit 对齐方式显示
 
 ## 推荐安装
 
 正式发布包里有两个 zip：
 
-- `blender_goh_gem_exporter-1.4.2.zip`
+- `blender_goh_gem_exporter-1.5.0.zip`
   Blender 插件安装包，推荐在 Blender 里直接安装这个文件。
-- `blender_goh_gem_exporter-1.4.2-full.zip`
+- `blender_goh_gem_exporter-1.5.0-full.zip`
   完整源码、文档、测试和示例素材快照，适合 GitHub 发布页或二次开发。
 
 安装步骤：
@@ -39,7 +41,7 @@
 1. 打开 Blender。
 2. 进入 `Edit > Preferences > Add-ons`。
 3. 点击 `Install...`。
-4. 选择 `blender_goh_gem_exporter-1.4.2.zip`。
+4. 选择 `blender_goh_gem_exporter-1.5.0.zip`。
 5. 启用 `GOH GEM Exporter`。
 
 ## Blender 面板

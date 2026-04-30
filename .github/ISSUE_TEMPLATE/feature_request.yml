@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest a GOH/GEM workflow improvement.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Workflow problem
+      description: What GOH/GEM or Blender workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired import, export, helper, physics, material, or preset behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: samples
+    attributes:
+      label: Samples or references
+      description: Link or attach official samples, saved `.blend` files, screenshots, SOEdit comparisons, or prior tools.

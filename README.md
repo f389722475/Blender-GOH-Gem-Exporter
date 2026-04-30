@@ -6,13 +6,14 @@
 
 It focuses on practical round-trip work between Blender, SOEdit, and legacy 3ds Max GOH workflows while keeping the authoring experience Blender-native.
 
-Current release: `1.4.2`.
+Current release: `1.5.0`.
 
 ## Highlights
 
 - Export `mdl`, `ply`, `mtl`, `vol`, and `anm`
 - Import `anm` back into Blender
 - Import whole `.mdl` models with visual meshes, volumes, obstacles, and areas
+- Import GOH `humanskin` `.mdl` files through the dedicated humanskin module
 - Export visible meshes, skinned meshes, and mesh animation
 - Export helper data for `Volume`, `Obstacle`, and `Area`
 - Write inline primitive collision for `Box`, `Sphere`, and `Cylinder`
@@ -28,6 +29,7 @@ Current release: `1.4.2`.
 - GOH model import now preserves source smoothing by applying EPLY normals as Blender custom split normals
 - Imported GOH mirrored `basis` transforms now display in game-matching Blender space by default while preserving original GOH rest metadata for export; ANM import and export share the same handedness compensation so Blender, SOEdit, and in-game playback stay aligned
 - GOH material import follows the GEM texture model: diffuse color, normal map, and specular map are mapped directly, with metallic forced off and roughness derived conservatively for Blender preview parity
+- GOH humanskin import merges LOD0 skin views into one editable skinned mesh, keeps weights/custom normals/smoothing, and displays skeleton/attachment points in SOEdit-aligned space
 
 ## Repository Layout
 
@@ -215,7 +217,7 @@ Compatibility rules:
 3. Select the zip file.
 4. Enable `GOH GEM Exporter`
 
-The official release asset is `blender_goh_gem_exporter-1.4.2.zip`.
+The official release asset is `blender_goh_gem_exporter-1.5.0.zip`.
 For a cleaner release-ready package, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Recommended Round-Trip Export Settings
@@ -255,6 +257,7 @@ python -X utf8 tests\smoke_test.py
 - [Detailed Plugin Guide - Chinese](docs/PLUGIN_GUIDE_ZH-CN.md)
 - [Physics Bake Workflow](docs/PHYSICS_BAKE.md)
 - [Official Max Plugin Compatibility Notes](docs/OFFICIAL_MAX_PLUGIN_NOTES.md)
+- [v1.5.0 Release Notes](docs/RELEASE_NOTES_v1.5.0.md)
 - [v1.4.2 Release Notes](docs/RELEASE_NOTES_v1.4.2.md)
 - [v1.4.1 Release Notes](docs/RELEASE_NOTES_v1.4.1.md)
 - [v1.4.0 Release Notes](docs/RELEASE_NOTES_v1.4.0.md)

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 1.5.0 - 2026-05-01
+
+### Added
+
+- Added a dedicated humanskin import module for GOH character `.mdl` files.
+- Humanskin LOD0 skin views are merged into a complete editable skinned mesh while preserving vertex groups, weights, source smoothing, and GOH custom normals.
+- Added humanskin import/export regression coverage for the `ger_heer_39_at` and `us_m41_medic` official samples.
+- Added repository-management guidance inspired by the `openai/codex` layout: agent instructions, contribution flow, issue templates, and a PR template.
+
+### Fixed
+
+- Fixed humanskin skeleton and attachment point display so points line up with SOEdit-style placement instead of scattering around the imported body.
+- Fixed humanskin round-trip skin bone indexing so exported `skin.ply` keeps the real GOH bone table instead of shifting weights by one slot.
+
+### Verified
+
+- Ran Python compile and addon smoke tests.
+- Ran the Blender runtime regression.
+- Ran the humanskin import/export regression for 5 iterations.
+
 ## 1.4.2 - 2026-04-30
 
 ### Added
