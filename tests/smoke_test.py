@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ADDON_DIR = ROOT / "blender_goh_gem_exporter"
 sys.path.insert(0, str(ADDON_DIR))
 
-from core.names import numbered_identifier  # noqa: E402
+from core.names import NUMBERING_RULE_PAD2, NUMBERING_RULE_PLAIN, number_from_identifier, numbered_identifier  # noqa: E402
 from goh_core import (  # noqa: E402
     AnimationFile,
     MeshAnimationState,
@@ -400,6 +400,12 @@ def main() -> None:
     assert numbered_identifier("wheelL", 1, True, "optional_first") == "wheelL1"
     assert numbered_identifier("wheelsl", 2, True, "optional_first") == "wheelsl2"
     assert numbered_identifier("seat01", 1, True) == "seat02"
+    assert numbered_identifier("seat01", 1, True, "increment", NUMBERING_RULE_PLAIN) == "seat2"
+    assert numbered_identifier("seat01", 9, True, "increment", NUMBERING_RULE_PAD2) == "seat10"
+    assert numbered_identifier("emit0", 0, True, "increment", NUMBERING_RULE_PLAIN) == "emit0"
+    assert numbered_identifier("emit0", 1, True, "increment", NUMBERING_RULE_PLAIN) == "emit1"
+    assert number_from_identifier("Emit1.003", "Emit1") == 1
+    assert number_from_identifier("emit10", "emit1") == 10
     assert "emit_lower_auto" in GOH_TEMPLATE_ROLE_PART_KEYS["TANK"]["attachment"]
     assert "trackleft" in GOH_TEMPLATE_ROLE_PART_KEYS["TANK"]["volume"]
     assert "wheell1_auto" in GOH_TEMPLATE_ROLE_PART_KEYS["CAR"]["volume"]
@@ -514,6 +520,7 @@ def main() -> None:
         mtl_text = mtl.read_text(encoding="utf-8")
         assert '{diffuse "test_body_c" {MipMap 0} {AlphaChannel 1}}' in mtl_text
         assert '{lightmap "test_body_mask" {MipMap 1}}' in mtl_text
+        assert "{blend test}" in mtl_text
         assert "{parallax_scale 1.5}" in mtl_text
         assert "{full_specular}" in mtl_text
         assert mesh_flags & 0x4000

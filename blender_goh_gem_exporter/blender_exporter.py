@@ -45,8 +45,11 @@ from .goh_core import (
     write_export_bundle,
 )
 from .core.names import (
+    NUMBERING_RULE_PAD2,
+    NUMBERING_RULE_PLAIN,
     numbered_display_name as _numbered_display_name,
     numbered_identifier as _numbered_identifier,
+    strip_blender_duplicate_suffix as _strip_blender_duplicate_suffix,
 )
 from .formats.legacy_props import (
     legacy_flag_set as _legacy_flag_set,
@@ -76,7 +79,7 @@ from .presets import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
-GOH_ADDON_VERSION = "1.4.1"
+GOH_ADDON_VERSION = "1.4.2"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),
@@ -299,6 +302,16 @@ class GOHAddonPresetSettings(PropertyGroup):
         name="Auto Number",
         description="When multiple objects are selected, append numeric suffixes so each generated name stays unique",
         default=True,
+    )
+    numbering_rule: EnumProperty(
+        name="Numbering Rule",
+        description="Number format used by presets whose label contains Auto",
+        items=(
+            (NUMBERING_RULE_PLAIN, "x1, x2", "Use plain numeric suffixes such as emit1, emit2, emit10"),
+            (NUMBERING_RULE_PAD2, "x01, x02", "Use two-digit suffixes such as emit01, emit02, emit10"),
+        ),
+        default=NUMBERING_RULE_PLAIN,
+        translation_context="GOH_PRESET",
     )
     helper_collections: BoolProperty(
         name="Link Helper Collections",
@@ -1015,22 +1028,102 @@ def _link_to_helper_collection(scene: bpy.types.Scene, obj: bpy.types.Object, co
         collection.objects.link(obj)
 
 
-def _apply_goh_preset_to_object(
-    scene: bpy.types.Scene,
-    obj: bpy.types.Object,
-    settings: GOHAddonPresetSettings,
-    index: int,
-) -> str:
-    role_preset = GOH_ROLE_PRESET_MAP[settings.role]
-    part_preset = _resolve_part_preset(settings.role, settings.part, settings.template_family)
+GOH_PRESET_NAME_PROPS = (
+    "goh_bone_name",
+    "goh_attach_bone",
+    "goh_volume_name",
+    "goh_volume_bone",
+    "goh_shape_name",
+)
+
+
+def _preset_name_key(name: str) -> str:
+    return _strip_blender_duplicate_suffix(name)
+
+
+def _preset_part_is_auto(part_preset) -> bool:
+    return "auto" in part_preset.key.lower() or "(auto)" in part_preset.label.lower()
+
+
+def _preset_reserved_names(selected_objects: Iterable[bpy.types.Object]) -> dict[str, set[str]]:
+    selected = set(selected_objects)
+    object_names: set[str] = set()
+    goh_names: set[str] = set()
+    for obj in bpy.data.objects:
+        if obj in selected:
+            continue
+        object_names.add(_preset_name_key(obj.name))
+        for prop_name in GOH_PRESET_NAME_PROPS:
+            value = obj.get(prop_name)
+            if isinstance(value, str) and value.strip():
+                goh_names.add(_preset_name_key(value))
+    return {"object": object_names, "goh": goh_names}
+
+
+def _preset_generated_names(role_preset, part_preset, settings: GOHAddonPresetSettings, index: int) -> tuple[str, str]:
+    numbering_rule = settings.numbering_rule if settings.auto_number else NUMBERING_RULE_PLAIN
     display_name = _numbered_display_name(
         part_preset.display_name,
         role_preset.name_suffix,
         index,
         settings.auto_number,
         part_preset.numbering,
+        numbering_rule,
     )
-    export_name = _numbered_identifier(part_preset.export_name, index, settings.auto_number, part_preset.numbering)
+    export_name = _numbered_identifier(
+        part_preset.export_name,
+        index,
+        settings.auto_number,
+        part_preset.numbering,
+        numbering_rule,
+    )
+    return display_name, export_name
+
+
+def _reserve_preset_names(used_names: dict[str, set[str]], display_name: str, export_name: str) -> None:
+    used_names["object"].add(_preset_name_key(display_name))
+    used_names["goh"].add(_preset_name_key(export_name))
+
+
+def _allocate_preset_names(
+    role_preset,
+    part_preset,
+    settings: GOHAddonPresetSettings,
+    index: int,
+    used_names: dict[str, set[str]],
+) -> tuple[str, str]:
+    if not settings.auto_number or not _preset_part_is_auto(part_preset):
+        display_name, export_name = _preset_generated_names(role_preset, part_preset, settings, index)
+        _reserve_preset_names(used_names, display_name, export_name)
+        return display_name, export_name
+
+    candidate_index = 0
+    while candidate_index < 10000:
+        display_name, export_name = _preset_generated_names(role_preset, part_preset, settings, candidate_index)
+        display_conflicts = settings.rename_objects and _preset_name_key(display_name) in used_names["object"]
+        export_conflicts = settings.write_export_names and _preset_name_key(export_name) in used_names["goh"]
+        if not display_conflicts and not export_conflicts:
+            _reserve_preset_names(used_names, display_name, export_name)
+            return display_name, export_name
+        candidate_index += 1
+
+    display_name, export_name = _preset_generated_names(role_preset, part_preset, settings, index)
+    _reserve_preset_names(used_names, display_name, export_name)
+    return display_name, export_name
+
+
+def _apply_goh_preset_to_object(
+    scene: bpy.types.Scene,
+    obj: bpy.types.Object,
+    settings: GOHAddonPresetSettings,
+    index: int,
+    display_name: str | None = None,
+    export_name: str | None = None,
+) -> str:
+    role_preset = GOH_ROLE_PRESET_MAP[settings.role]
+    part_preset = _resolve_part_preset(settings.role, settings.part, settings.template_family)
+    if display_name is None or export_name is None:
+        display_name, export_name = _preset_generated_names(role_preset, part_preset, settings, index)
     target_override = settings.target_name.strip()
     target_name = target_override or export_name
 
@@ -1112,6 +1205,15 @@ class EXPORT_SCENE_OT_goh_model(Operator, ExportHelper):
     )
     scale_factor: FloatProperty(name="Scale Factor", default=GOH_NATIVE_SCALE, min=0.001, soft_max=1000.0)
     flip_v: BoolProperty(name="Flip V", default=True)
+    material_blend: EnumProperty(
+        name="Material Blend",
+        items=(
+            ("none", "blend none", "Write {blend none} for exported material files"),
+            ("test", "blend test", "Write {blend test} for exported material files"),
+            ("blend", "blend blend", "Write {blend blend} for exported material files"),
+        ),
+        default="none",
+    )
     export_animations: BoolProperty(name="Export Animations", default=True)
     anm_format: EnumProperty(
         name="ANM Format",
@@ -1134,6 +1236,7 @@ class EXPORT_SCENE_OT_goh_model(Operator, ExportHelper):
         layout.prop(self, "axis_mode")
         layout.prop(self, "scale_factor")
         layout.prop(self, "flip_v")
+        layout.prop(self, "material_blend")
         layout.prop(self, "export_animations")
         if self.export_animations:
             layout.prop(self, "anm_format")
@@ -1284,7 +1387,9 @@ class OBJECT_OT_goh_apply_preset(Operator):
             return {"CANCELLED"}
 
         role_preset = GOH_ROLE_PRESET_MAP[settings.role]
+        part_preset = _resolve_part_preset(settings.role, settings.part, settings.template_family)
         selected_objects = sorted(context.selected_objects, key=lambda obj: obj.name.lower())
+        used_names = _preset_reserved_names(selected_objects)
         applied_names: list[str] = []
         skipped = 0
 
@@ -1292,7 +1397,17 @@ class OBJECT_OT_goh_apply_preset(Operator):
             if role_preset.key in {"volume", "obstacle", "area"} and obj.type != "MESH":
                 skipped += 1
                 continue
-            applied_names.append(_apply_goh_preset_to_object(context.scene, obj, settings, index))
+            display_name, export_name = _allocate_preset_names(role_preset, part_preset, settings, index, used_names)
+            applied_names.append(
+                _apply_goh_preset_to_object(
+                    context.scene,
+                    obj,
+                    settings,
+                    index,
+                    display_name=display_name,
+                    export_name=export_name,
+                )
+            )
 
         if not applied_names:
             self.report({"WARNING"}, "No compatible objects were selected for this GOH preset.")
@@ -2483,6 +2598,8 @@ class VIEW3D_PT_goh_presets(Panel):
         layout.prop(settings, "rename_objects")
         layout.prop(settings, "write_export_names")
         layout.prop(settings, "auto_number")
+        if settings.auto_number:
+            layout.prop(settings, "numbering_rule")
         layout.prop(settings, "helper_collections")
         layout.prop(settings, "clear_conflicts")
         layout.prop(settings, "mesh_animation_mode")
