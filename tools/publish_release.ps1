@@ -145,6 +145,19 @@ function Test-GitHasChanges {
     }
 }
 
+function Test-GhReleaseExists {
+    param([Parameter(Mandatory = $true)][string]$TagName)
+    $oldErrorActionPreference = $ErrorActionPreference
+    try {
+        $script:ErrorActionPreference = "Continue"
+        gh release view $TagName --repo $Repo --json tagName 1> $null 2> $null
+        return ($LASTEXITCODE -eq 0)
+    }
+    finally {
+        $script:ErrorActionPreference = $oldErrorActionPreference
+    }
+}
+
 if (-not (Test-Path -LiteralPath $GitRoot)) {
     throw "Git root does not exist: $GitRoot"
 }
@@ -215,15 +228,7 @@ if (-not $NoPush) {
     Invoke-Git @("push", "origin", $tag)
 }
 
-$existingRelease = $false
-Push-Location -LiteralPath $GitRoot
-try {
-    gh release view $tag --repo $Repo --json tagName 1> $null 2> $null
-    $existingRelease = ($LASTEXITCODE -eq 0)
-}
-finally {
-    Pop-Location
-}
+$existingRelease = Test-GhReleaseExists -TagName $tag
 
 if ($existingRelease) {
     if (-not $ReplaceExistingRelease) {
