@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- No changes yet.
+
+## 1.5.1 - 2026-05-01
+
+### Added
+
+- Added an Eight Fire Directions physics-bake preset with diagonal `fire_fl`, `fire_bl`, `fire_br`, and `fire_fr` clips.
+- Added a fire trigger volume generator that creates `recoil_gun_*_vol` pie-slice GOH volumes under `basis` and a `gun_recoil` point under `turret`.
+- Added `Body Sway Strength` and `Antenna Sway Strength` sliders for quick rebake tuning without reassigning physics links.
+- Added an `Antenna Mount` selector so directional bakes can treat whip antennas as either body-mounted or turret-mounted.
+
+### Fixed
+
+- Fixed `Bake Directional Set` so it rebuilds fire clips from the scene start frame instead of appending from the current viewport frame.
+- Fixed directional barrel and turret-scoped linked clips so every fire direction uses the same fixed `X/-X` recoil stroke instead of sliding diagonally or sideways.
+- Fixed directional fire body response so the hull first recoils opposite the fire direction with a nose-up kick, then returns forward/down.
+- Fixed Antenna Whip directional polarity and axis selection so every fire direction uses the fixed gun `X/-X` sway and the free antenna tip initially swings toward `+X` when the gun and hull recoil backward.
+- Fixed legacy Antenna Whip FRM2 export so saved generated whip shape keys are sampled directly even when older `.blend` files are missing `goh_physics_role`, preventing later directional clips from stretching the antenna mesh.
+- Fixed repeated directional antenna rebakes so all eight whip segments, including `fire_fr`, keep clean shape-key curves.
+- Fixed generated `gun_recoil` placement so its basis-space Z position stays aligned with the `recoil_gun_front_vol` trigger plane while remaining a `turret` child.
+- Fixed repeated fire-trigger generation so replaced `recoil_gun_*_vol` meshes remain parented and aligned to `basis` instead of drifting toward `turret`.
+
+### Changed
+
+- Replaced the old Six Local Axes directional bake option with Eight Fire Directions and aligned fire directions to the GOH vehicle horizontal axes: `front/back/left/right = +X/-X/+Y/-Y`.
+
 ## 1.5.0 - 2026-05-01
 
 ### Added

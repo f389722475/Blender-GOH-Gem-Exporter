@@ -788,9 +788,12 @@ class GOHBlenderExporter:
         clip: AnimationClipSpec | None = None,
     ) -> Matrix:
         role = str(obj.get("goh_physics_role") or "").strip().upper()
-        if not role or role == "SOURCE":
+        generated_physics = self._is_generated_physics_animation(obj, clip)
+        if role == "SOURCE" or self._is_generated_source_physics_animation(obj, clip):
             return loc_rot_matrix
-        if not self._is_generated_physics_animation(obj, clip):
+        if not role and not generated_physics:
+            return loc_rot_matrix
+        if not generated_physics:
             return loc_rot_matrix
         if rest_matrix is None:
             return loc_rot_matrix
@@ -854,8 +857,7 @@ class GOHBlenderExporter:
     def _mesh_animation_rigid_fallback_matrix(self, obj: bpy.types.Object, loc_rot_matrix: Matrix) -> Matrix:
         if obj.type != "MESH":
             return loc_rot_matrix
-        role = str(obj.get("goh_physics_role") or "").strip().upper()
-        if role != "ANTENNA_WHIP":
+        if not self._has_generated_antenna_whip_keys(obj):
             return loc_rot_matrix
         shape_keys = getattr(obj.data, "shape_keys", None)
         if shape_keys is None or len(shape_keys.key_blocks) < 2:
@@ -873,7 +875,14 @@ class GOHBlenderExporter:
         if not root_indices or not tip_indices:
             return loc_rot_matrix
 
-        evaluated_positions = self._evaluated_mesh_positions(obj)
+        active_mesh = self._active_antenna_shape_key_mesh(obj)
+        if active_mesh is not None:
+            try:
+                evaluated_positions = [vertex.co.copy() for vertex in active_mesh.vertices]
+            finally:
+                bpy.data.meshes.remove(active_mesh)
+        else:
+            evaluated_positions = self._evaluated_mesh_positions(obj)
         if evaluated_positions is None or len(evaluated_positions) != len(base_positions):
             return loc_rot_matrix
 
@@ -949,8 +958,7 @@ class GOHBlenderExporter:
     def _active_antenna_shape_key_mesh(self, obj: bpy.types.Object) -> bpy.types.Mesh | None:
         if obj.type != "MESH":
             return None
-        role = str(obj.get("goh_physics_role") or "").strip().upper()
-        if role != "ANTENNA_WHIP":
+        if not self._has_generated_antenna_whip_keys(obj):
             return None
         shape_keys = getattr(obj.data, "shape_keys", None)
         if shape_keys is None or len(shape_keys.key_blocks) < 2:
@@ -960,7 +968,14 @@ class GOHBlenderExporter:
             if key.name.startswith(GOH_ANTENNA_SHAPE_KEY_PREFIX) and float(key.value) > 0.5
         ]
         if not candidates:
-            return None
+            basis_key = shape_keys.key_blocks.get("Basis") or shape_keys.key_blocks[0]
+            if len(basis_key.data) != len(obj.data.vertices):
+                return None
+            mesh = obj.data.copy()
+            for vertex, shape_point in zip(mesh.vertices, basis_key.data):
+                vertex.co = shape_point.co
+            mesh.update()
+            return mesh
         key_block = max(candidates, key=lambda key: float(key.value))
         if len(key_block.data) != len(obj.data.vertices):
             return None
@@ -969,6 +984,17 @@ class GOHBlenderExporter:
             vertex.co = shape_point.co
         mesh.update()
         return mesh
+
+    def _has_generated_antenna_whip_keys(self, obj: bpy.types.Object) -> bool:
+        if obj.type != "MESH" or obj.data is None:
+            return False
+        shape_keys = getattr(obj.data, "shape_keys", None)
+        if shape_keys is None or len(shape_keys.key_blocks) < 2:
+            return False
+        return any(
+            key.name.startswith(GOH_ANTENNA_SHAPE_KEY_PREFIX)
+            for key in shape_keys.key_blocks[1:]
+        )
 
     def _basis_helper_ancestor(self, obj: bpy.types.Object) -> bpy.types.Object | None:
         parent = obj.parent
@@ -1004,6 +1030,21 @@ class GOHBlenderExporter:
                         names.append(strip_action.name)
         prefixes = tuple(prefix.lower() for prefix in GOH_PHYSICS_ACTION_PREFIXES)
         return any(str(name).strip().lower().startswith(prefixes) for name in names)
+
+    def _is_generated_source_physics_animation(self, obj: bpy.types.Object, clip: AnimationClipSpec | None) -> bool:
+        names: list[str] = []
+        if clip is not None:
+            names.extend(name for name in (clip.name, clip.file_stem) if name)
+        animation_data = getattr(obj, "animation_data", None)
+        action = getattr(animation_data, "action", None) if animation_data else None
+        if action is not None:
+            names.append(action.name)
+        lowered = [str(name).strip().lower() for name in names]
+        return any(
+            name.startswith("goh_recoil_source")
+            or name.startswith("goh_directional_recoil_source")
+            for name in lowered
+        )
 
     def _local_rest_reflection_matrix(self, rest_matrix: Matrix) -> Matrix | None:
         if not self._matrix_is_mirrored(rest_matrix):
