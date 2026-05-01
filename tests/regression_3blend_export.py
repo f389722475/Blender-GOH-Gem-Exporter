@@ -97,6 +97,15 @@ def _animation_with_bones(paths: list[Path], *bone_names: str):
     raise RuntimeError(f"No exported ANM contains required bones: {', '.join(bone_names)}")
 
 
+def _named_animation_with_bones(paths: list[Path], preferred_stem: str, *bone_names: str):
+    preferred = [path for path in paths if path.stem.lower() == preferred_stem.lower()]
+    for path in preferred + [path for path in paths if path not in preferred]:
+        animation = read_animation(path)
+        if all(name in animation.bone_names for name in bone_names):
+            return path, animation
+    raise RuntimeError(f"No exported ANM contains required bones: {', '.join(bone_names)}")
+
+
 def _body_local_pitch_at_frame(frame: int) -> float:
     body = next(
         (
@@ -152,7 +161,7 @@ def main() -> None:
     try:
         _repair_legacy_emit_auto_names()
         auto_paths = _export_probe(OUTPUT_ROOT / "auto", anm_format="AUTO")
-        auto_path, auto_animation = _animation_with_bones(auto_paths, "body", "antenna")
+        auto_path, auto_animation = _named_animation_with_bones(auto_paths, "fire_front", "body", "antenna")
         if any(frame for animation_path in auto_paths for frame in read_animation(animation_path).mesh_frames):
             raise RuntimeError("AUTO export wrote MESH animation chunks, which prevents SOEdit from opening fire.anm.")
         if len(auto_animation.frames) <= 12:
@@ -173,10 +182,18 @@ def main() -> None:
             raise RuntimeError("AUTO export did not convert antenna shape-key whip into a SOEdit-safe bone fallback.")
 
         frm2_paths = _export_probe(OUTPUT_ROOT / "frm2", anm_format="FRM2")
-        _frm2_path, frm2_animation = _animation_with_bones(frm2_paths, "antenna")
-        if not any("antenna" in frame for frame in frm2_animation.mesh_frames):
+        frm2_animations = []
+        for path in frm2_paths:
+            animation = read_animation(path)
+            if "antenna" in animation.bone_names:
+                frm2_animations.append(animation)
+        if not frm2_animations or not any(
+            "antenna" in frame
+            for animation in frm2_animations
+            for frame in animation.mesh_frames
+        ):
             raise RuntimeError("Explicit FRM2 export did not write antenna mesh-animation chunks.")
-        bbox_limit = _mesh_bbox_max_abs(frm2_animation, "antenna")
+        bbox_limit = max(_mesh_bbox_max_abs(animation, "antenna") for animation in frm2_animations)
         if bbox_limit > 30.0:
             raise RuntimeError(f"Explicit FRM2 antenna mesh animation is stretched: bbox limit {bbox_limit:.3f}.")
 

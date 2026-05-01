@@ -72,12 +72,31 @@ Use `Bake Directional Set` when one weapon needs several GOH clips.
 Typical use:
 
 - assign linked parts once
-- set `Direction Set` to `Four Fire Directions`
+- set `Direction Set` to `Four Fire Directions` or `Eight Fire Directions`
 - keep `Clip Prefix` as `fire`
 - run `Bake Directional Set`
 
 The addon writes timeline clip ranges such as `fire_front`, `fire_back`, `fire_left`, and `fire_right`.
-The six-axis mode also adds `up` and `down` clips for special cases.
+Eight-direction mode adds the diagonal clips `fire_fl`, `fire_bl`, `fire_br`, and `fire_fr`.
+For GOH vehicle fire triggers, the horizontal mapping is `front = +X`, `back = -X`, `left = +Y`, and `right = -Y`.
+Directional fire clips are rebuilt from the scene start frame, so a saved file left on a later frame does not append duplicate fire ranges. The barrel always uses the same fixed `X/-X` stroke (`fire_front`, side clips, and diagonal clips all pull toward `-X` and return through `+X`). Since the turret itself supplies heading in game, turret-scoped linked parts and Antenna Whip links also stay on the fixed gun `X/-X` sway axis instead of following diagonal/side fire names; antenna free tips initially bend toward vehicle-forward `+X` when the gun and hull recoil backward. Body Spring links outside the turret still use the named fire direction to kick the hull backward/nose-up first and then recover forward/down.
+
+Use `Body Sway Strength` and `Antenna Sway Strength` as quick multipliers when the directional set has the right timing and direction but needs heavier or lighter hull/antenna motion. They are applied at bake time, so you can change the sliders and run the bake again without reassigning stored physics links.
+
+Set `Antenna Mount` to `Antenna on Turret` for turret-parented antennas that should bake with the fixed turret/gun `X/-X` axis. Set it to `Antenna on Body` for hull/body antennas so the antenna whip follows the same named fire direction as the body recoil.
+
+FRM2 export samples generated `GOH_AntennaWhip_*` shape keys through a dedicated single-key path, including older saved scenes that have the generated keys but no stored `Antenna Whip` role metadata. This avoids accumulated shape-key deformation between directional clips.
+
+## Fire Trigger Volumes
+
+Use `Create Fire Trigger Volumes` near the Direction Set controls to generate the game-side trigger helper layout:
+
+- `basis` receives closed pie-slice GOH volume meshes named `recoil_gun_*_vol`.
+- `turret` receives or reuses a `gun_recoil` point so the point follows turret rotation.
+- Four-direction mode creates `front`, `back`, `left`, and `right` trigger slices.
+- Eight-direction mode also creates the abbreviated diagonal slices `fl`, `bl`, `br`, and `fr`.
+
+The generated four-way slices are split with a 45 degree sector offset; eight-way slices use 22.5 degrees, so a sector center aligns with the vehicle +X axis.
 
 ## Impact Response
 
@@ -172,6 +191,6 @@ It borrows ideas from real-time physically based animation without running a hea
 - For new GOH-native imports, keep `Defer Basis Flip` enabled when you need Blender to match SOEdit/game helper placement while preserving the mirrored source basis for export. Disable it only when you intentionally need to inspect the raw mirrored file-space parent; ANM import and export both apply the matching basis handedness compensation in the default display mode.
 - Mesh ripple is exported through the existing mesh-animation path.
 - For GOH use, keep the motion short and readable.
-- If one animation must cover many fire directions, create separate directional clips such as `fire_front`, `fire_left`, `fire_right`, or bake each turret direction separately.
+- If one animation must cover many fire directions, create separate directional clips such as `fire_front`, `fire_fl`, `fire_left`, or bake each turret direction separately.
 - `Assign Physics Link` writes role defaults automatically when the UI fields are still at generic values, so a role behaves like a real preset immediately.
 - `Clear Physics Links` removes stored physics links, and can also detach generated GOH physics actions or clip-range metadata when `Clear Baked Actions` is enabled.

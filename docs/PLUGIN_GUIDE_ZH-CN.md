@@ -463,9 +463,15 @@ goh_sequence_ranges = fire:1-48; hit_body:49-96
 - `fire_back`
 - `fire_left`
 - `fire_right`
+- `fire_fl`
+- `fire_bl`
+- `fire_br`
+- `fire_fr`
 - `hit`
 - `open`
 - `close`
+
+开火触发体可以用 `Create Fire Trigger Volumes` 一键生成：在 `basis` 下创建 `recoil_gun_*_vol` 圆饼扇形 volume，在 `turret` 下创建或复用 `gun_recoil` 点位。四方向把 `front/back/left/right` 对齐到 `+X/-X/+Y/-Y`；八方向额外生成 `fl/bl/br/fr`。
 
 ## 13. 导出
 

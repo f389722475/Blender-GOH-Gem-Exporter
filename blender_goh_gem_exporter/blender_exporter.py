@@ -79,7 +79,7 @@ from .presets import (
 EPSILON = 1e-6
 GOH_NATIVE_SCALE = 20.0
 GOH_BASIS_HELPER_NAME = "Basis"
-GOH_ADDON_VERSION = "1.5.0"
+GOH_ADDON_VERSION = "1.5.1"
 
 GOH_TRANSFORM_BLOCK_ITEMS = (
     ("AUTO", "Auto", "Write Position / Orientation / Matrix34 automatically based on the transform content"),
@@ -587,7 +587,7 @@ class GOHToolSettings(PropertyGroup):
         name="Direction Set",
         items=(
             ("FOUR_FIRE", "Four Fire Directions", "Bake fire_front, fire_back, fire_left, and fire_right recoil clips"),
-            ("SIX_LOCAL", "Six Local Axes", "Bake clips for all six local axes"),
+            ("EIGHT_FIRE", "Eight Fire Directions", "Bake eight horizontal fire-direction recoil clips"),
         ),
         default="FOUR_FIRE",
         translation_context="GOH_PRESET",
@@ -629,6 +629,30 @@ class GOHToolSettings(PropertyGroup):
         default=1.0,
         min=0.0,
         soft_max=4.0,
+    )
+    physics_body_sway_strength: FloatProperty(
+        name="Body Sway Strength",
+        description="Extra multiplier for Body Spring hull kick and rocking during linked or directional recoil bakes",
+        default=1.0,
+        min=0.0,
+        soft_max=4.0,
+    )
+    physics_antenna_sway_strength: FloatProperty(
+        name="Antenna Sway Strength",
+        description="Extra multiplier for Antenna Whip tip bend during linked or directional recoil bakes",
+        default=1.0,
+        min=0.0,
+        soft_max=4.0,
+    )
+    physics_antenna_mount: EnumProperty(
+        name="Antenna Mount",
+        description="Choose whether directional antenna whip follows the body fire direction or the fixed turret/gun X axis",
+        items=(
+            ("TURRET", "Antenna on Turret", "Bake antenna whip with the turret/gun X/-X recoil axis"),
+            ("BODY", "Antenna on Body", "Bake antenna whip with the body directional recoil response"),
+        ),
+        default="TURRET",
+        translation_context="GOH_PRESET",
     )
     physics_duration_scale: FloatProperty(
         name="Duration Scale",
@@ -748,6 +772,39 @@ class GOHToolSettings(PropertyGroup):
     physics_include_scene_links: BoolProperty(
         name="Use Stored Links",
         description="Bake all scene objects whose goh_physics_source points at the active source, even if they are not selected",
+        default=True,
+    )
+    fire_trigger_radius: FloatProperty(
+        name="Trigger Radius",
+        description="Radius of the generated recoil_gun_* pie-slice trigger volumes",
+        default=0.45,
+        min=0.01,
+        soft_max=5.0,
+    )
+    fire_trigger_thickness: FloatProperty(
+        name="Trigger Thickness",
+        description="Vertical thickness of each generated fire trigger volume",
+        default=0.05,
+        min=0.001,
+        soft_max=1.0,
+    )
+    fire_trigger_point_distance: FloatProperty(
+        name="gun_recoil Distance",
+        description="Distance from the turret pivot to a newly-created gun_recoil point along turret local +X",
+        default=0.40,
+        min=0.0,
+        soft_max=5.0,
+    )
+    fire_trigger_arc_segments: IntProperty(
+        name="Arc Segments",
+        description="Outer-arc subdivisions per generated pie-slice trigger volume",
+        default=8,
+        min=1,
+        max=32,
+    )
+    fire_trigger_replace_existing: BoolProperty(
+        name="Replace Existing",
+        description="Replace existing recoil_gun_*_vol trigger volumes while preserving an existing gun_recoil point",
         default=True,
     )
     physics_clear_actions: BoolProperty(
@@ -914,6 +971,10 @@ def _local_axis_vector(axis_key: str) -> Vector:
         "NEG_X": Vector((-1.0, 0.0, 0.0)),
         "Y": Vector((0.0, 1.0, 0.0)),
         "NEG_Y": Vector((0.0, -1.0, 0.0)),
+        "X_Y": Vector((1.0, 1.0, 0.0)).normalized(),
+        "NEG_X_Y": Vector((-1.0, 1.0, 0.0)).normalized(),
+        "NEG_X_NEG_Y": Vector((-1.0, -1.0, 0.0)).normalized(),
+        "X_NEG_Y": Vector((1.0, -1.0, 0.0)).normalized(),
         "Z": Vector((0.0, 0.0, 1.0)),
         "NEG_Z": Vector((0.0, 0.0, -1.0)),
     }
@@ -2214,7 +2275,8 @@ class OBJECT_OT_goh_bake_directional_recoil_set(Operator):
             return {"CANCELLED"}
 
         linked = _physics_linked_objects(context, source, settings.physics_include_scene_links)
-        start_base = int(context.scene.frame_current)
+        start_base = int(getattr(context.scene, "frame_start", context.scene.frame_current))
+        context.scene.frame_set(start_base)
         total = max(3, int(settings.recoil_frames))
         clip_total = _physics_max_clip_frames(settings, linked, total)
         distance = float(settings.recoil_distance)
@@ -2227,7 +2289,14 @@ class OBJECT_OT_goh_bake_directional_recoil_set(Operator):
             end = start + clip_total
             peak = start + max(1, total // 4)
             settle = start + max(2, total // 2)
-            source_axis = _physics_axis_world(source, axis_key)
+            # Direction-set clip names describe the GOH fire direction. The barrel
+            # itself always performs a straight local-X recoil/return stroke.
+            # Linked hull responses still use the named fire direction as their
+            # impulse proxy, while turret-scoped parts and antenna whip stay on
+            # the same X/-X gun axis because the turret rotation supplies heading.
+            fire_axis = _physics_axis_world(source, axis_key)
+            barrel_axis = _physics_axis_world(source, "X")
+            source_axis = -barrel_axis
             _physics_bake_source_recoil(
                 source,
                 source_axis,
@@ -2242,10 +2311,22 @@ class OBJECT_OT_goh_bake_directional_recoil_set(Operator):
                 create_nla=settings.physics_create_nla_clips,
                 clip_end=end,
             )
+            antenna_mount = str(getattr(settings, "physics_antenna_mount", "TURRET") or "TURRET").upper()
             for obj in sorted(linked, key=lambda item: item.name.lower()):
+                linked_role = _physics_role_from_object(obj, settings)
+                turret_scoped = _physics_is_turret_scoped_object(obj)
+                if linked_role == "ANTENNA_WHIP":
+                    linked_axis = fire_axis if antenna_mount == "BODY" else barrel_axis
+                    linked_source_obj = None if antenna_mount == "BODY" else source
+                elif turret_scoped:
+                    linked_axis = barrel_axis
+                    linked_source_obj = source
+                else:
+                    linked_axis = fire_axis
+                    linked_source_obj = source
                 _physics_bake_linked_response(
                     obj,
-                    source_axis,
+                    linked_axis,
                     distance,
                     start,
                     end,
@@ -2255,11 +2336,39 @@ class OBJECT_OT_goh_bake_directional_recoil_set(Operator):
                     file_stem=clip_name,
                     create_nla=settings.physics_create_nla_clips,
                     base_duration=total,
-                    source_obj=source,
+                    source_obj=linked_source_obj,
+                    invert_body_rotation=True,
+                    invert_body_primary_translation=True,
+                    force_procedural_source_motion=True,
+                    procedural_source_axis=-linked_axis,
                 )
 
         context.scene.frame_set(start_base)
         self.report({"INFO"}, f"Baked {len(clip_specs)} directional recoil clip(s) from {source.name}.")
+        return {"FINISHED"}
+
+
+class OBJECT_OT_goh_create_fire_recoil_triggers(Operator):
+    bl_idname = "object.goh_create_fire_recoil_triggers"
+    bl_label = "Create Fire Trigger Volumes"
+    bl_description = "Create basis-level recoil_gun_* pie-slice volumes and a turret-level gun_recoil point"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return context.scene is not None
+
+    def execute(self, context: bpy.types.Context):
+        settings = getattr(context.scene, "goh_tool_settings", None)
+        if settings is None:
+            self.report({"ERROR"}, "GOH tool settings are not available.")
+            return {"CANCELLED"}
+        try:
+            created, point = _physics_create_fire_trigger_volumes(context, settings)
+        except RuntimeError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Created {created} fire trigger volume(s) and prepared {point.name}.")
         return {"FINISHED"}
 
 
@@ -2523,11 +2632,25 @@ class VIEW3D_PT_goh_tools(Panel):
         physics_box.separator()
         physics_box.prop(settings, "physics_direction_set")
         physics_box.prop(settings, "physics_clip_prefix")
+        trigger_box = physics_box.box()
+        trigger_box.label(text="Fire Trigger Volumes")
+        row = trigger_box.row(align=True)
+        row.prop(settings, "fire_trigger_radius")
+        row.prop(settings, "fire_trigger_thickness")
+        trigger_box.prop(settings, "fire_trigger_point_distance")
+        row = trigger_box.row(align=True)
+        row.prop(settings, "fire_trigger_arc_segments")
+        row.prop(settings, "fire_trigger_replace_existing")
+        trigger_box.operator(OBJECT_OT_goh_create_fire_recoil_triggers.bl_idname, text="Create Fire Trigger Volumes")
         physics_box.prop(settings, "physics_impact_clip_name")
         physics_box.prop(settings, "physics_ripple_amplitude")
         physics_box.prop(settings, "physics_ripple_radius")
         physics_box.prop(settings, "physics_ripple_waves")
         physics_box.prop(settings, "physics_power")
+        row = physics_box.row(align=True)
+        row.prop(settings, "physics_body_sway_strength")
+        row.prop(settings, "physics_antenna_sway_strength")
+        physics_box.prop(settings, "physics_antenna_mount")
         physics_box.prop(settings, "physics_duration_scale")
         physics_box.prop(settings, "physics_create_nla_clips")
         row = physics_box.row(align=True)
@@ -2656,6 +2779,7 @@ CLASSES = (
     OBJECT_OT_goh_assign_physics_link,
     OBJECT_OT_goh_bake_linked_recoil,
     OBJECT_OT_goh_bake_directional_recoil_set,
+    OBJECT_OT_goh_create_fire_recoil_triggers,
     OBJECT_OT_goh_bake_impact_response,
     OBJECT_OT_goh_create_armor_ripple,
     OBJECT_OT_goh_load_physics_defaults,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import math
 import shutil
 import sys
 
@@ -995,12 +996,149 @@ def main() -> None:
         ):
             raise RuntimeError("Physics role duration defaults are not ordered from whip tail to short rumble.")
 
+        eight_specs = exporter_module._physics_direction_specs("EIGHT_FIRE", "fire")
+        expected_eight_specs = (
+            ("fire_front", "X"),
+            ("fire_fl", "X_Y"),
+            ("fire_left", "Y"),
+            ("fire_bl", "NEG_X_Y"),
+            ("fire_back", "NEG_X"),
+            ("fire_br", "NEG_X_NEG_Y"),
+            ("fire_right", "NEG_Y"),
+            ("fire_fr", "X_NEG_Y"),
+        )
+        if eight_specs != expected_eight_specs:
+            raise RuntimeError(f"Eight Fire direction specs changed unexpectedly: {eight_specs!r}")
+
+        trigger_basis = bpy.data.objects.get("basis")
+        created_trigger_basis = trigger_basis is None
+        if trigger_basis is None:
+            bpy.ops.object.empty_add(type="PLAIN_AXES", location=(0.0, 0.0, 0.0))
+            trigger_basis = bpy.context.active_object
+            trigger_basis.name = "basis"
+        trigger_basis["goh_bone_name"] = "basis"
+        trigger_turret = bpy.data.objects.get("turret")
+        created_trigger_turret = trigger_turret is None
+        if trigger_turret is None:
+            bpy.ops.object.empty_add(type="PLAIN_AXES", location=(1.0, 2.0, 0.5))
+            trigger_turret = bpy.context.active_object
+            trigger_turret.name = "turret"
+        trigger_turret["goh_bone_name"] = "turret"
+        trigger_turret.parent = trigger_basis
+        tool_settings.physics_direction_set = "EIGHT_FIRE"
+        tool_settings.fire_trigger_radius = 0.5
+        tool_settings.fire_trigger_thickness = 0.1
+        tool_settings.fire_trigger_point_distance = 0.4
+        tool_settings.fire_trigger_arc_segments = 4
+        trigger_result = bpy.ops.object.goh_create_fire_recoil_triggers()
+        if "FINISHED" not in trigger_result:
+            raise RuntimeError(f"Fire trigger volume generation failed: {trigger_result}")
+        trigger_point = bpy.data.objects.get("gun_recoil")
+        if trigger_point is None or trigger_point.parent != trigger_turret:
+            raise RuntimeError("Fire trigger generator did not create gun_recoil under turret.")
+        if trigger_point.get("goh_bone_name") != "gun_recoil" or trigger_point.location.x <= 0.0:
+            raise RuntimeError("Generated gun_recoil point did not keep usable GOH point metadata.")
+        trigger_point_basis_location = trigger_basis.matrix_world.inverted_safe() @ trigger_point.matrix_world.to_translation()
+        if abs(trigger_point_basis_location.z) > 1e-6:
+            raise RuntimeError("Generated gun_recoil point Z location is not aligned to the basis trigger-volume plane.")
+        trigger_point_z_basis = trigger_basis.matrix_world.to_3x3().inverted_safe() @ (
+            trigger_point.matrix_world.to_3x3() @ Vector((0.0, 0.0, 1.0))
+        )
+        if trigger_point_z_basis.length <= 1e-6:
+            raise RuntimeError("Generated gun_recoil point has a degenerate local Z axis.")
+        trigger_point_z_basis.normalize()
+        expected_trigger_angles = {
+            "recoil_gun_front_vol": 0.0,
+            "recoil_gun_fl_vol": 45.0,
+            "recoil_gun_left_vol": 90.0,
+            "recoil_gun_bl_vol": 135.0,
+            "recoil_gun_back_vol": 180.0,
+            "recoil_gun_br_vol": 225.0,
+            "recoil_gun_right_vol": 270.0,
+            "recoil_gun_fr_vol": 315.0,
+        }
+        for object_name, expected_angle in expected_trigger_angles.items():
+            trigger_volume = bpy.data.objects.get(object_name)
+            if trigger_volume is None:
+                raise RuntimeError(f"Missing generated fire trigger volume: {object_name}")
+            parent = trigger_volume.parent
+            parent_is_basis = parent is not None and (
+                parent.name.split(".", 1)[0].lower() == "basis"
+                or str(parent.get("goh_bone_name") or "").lower() == "basis"
+            )
+            if not parent_is_basis or not trigger_volume.get("goh_is_volume"):
+                raise RuntimeError(f"{object_name} is not a basis-level GOH volume.")
+            if trigger_volume.get("goh_volume_name") != object_name.removesuffix("_vol"):
+                raise RuntimeError(f"{object_name} did not store a stable GOH volume name.")
+            if abs(math.degrees(trigger_volume.rotation_euler.z) - 22.5) > 1e-4:
+                raise RuntimeError(f"{object_name} did not use the expected 22.5 degree sector split rotation.")
+            basis_inverse = trigger_volume.parent.matrix_world.inverted_safe()
+            if abs(trigger_volume.location.z - trigger_point_basis_location.z) > 1e-6:
+                raise RuntimeError(f"{object_name} is not on the same basis Z plane as gun_recoil.")
+            center = Vector((0.0, 0.0, 0.0))
+            for vertex in trigger_volume.data.vertices:
+                center += basis_inverse @ (trigger_volume.matrix_world @ vertex.co)
+            center /= float(max(1, len(trigger_volume.data.vertices)))
+            delta = center - trigger_volume.location
+            angle = (math.degrees(math.atan2(delta.y, delta.x)) + 360.0) % 360.0
+            diff = abs(((angle - expected_angle + 180.0) % 360.0) - 180.0)
+            if diff > 1.0:
+                raise RuntimeError(f"{object_name} sector center angle is {angle:.2f}, expected {expected_angle:.2f}.")
+            if object_name == "recoil_gun_front_vol":
+                front_delta = delta.copy()
+                if front_delta.length <= 1e-6:
+                    raise RuntimeError("Generated front trigger volume has a degenerate sector center.")
+                front_delta.normalize()
+                if trigger_point_z_basis.dot(front_delta) < 0.999:
+                    raise RuntimeError("gun_recoil local Z axis is not aligned to recoil_gun_front_vol.")
+        first_front_parent = bpy.data.objects["recoil_gun_front_vol"].parent
+        first_front_location = bpy.data.objects["recoil_gun_front_vol"].location.copy()
+        first_point_basis_location = trigger_point_basis_location.copy()
+        trigger_result = bpy.ops.object.goh_create_fire_recoil_triggers()
+        if "FINISHED" not in trigger_result:
+            raise RuntimeError(f"Repeated fire trigger volume generation failed: {trigger_result}")
+        repeated_front = bpy.data.objects.get("recoil_gun_front_vol")
+        repeated_point = bpy.data.objects.get("gun_recoil")
+        if repeated_front is None or repeated_point is None:
+            raise RuntimeError("Repeated fire trigger generation removed required trigger objects.")
+        repeated_parent = repeated_front.parent
+        repeated_parent_is_basis = repeated_parent is not None and (
+            repeated_parent.name.split(".", 1)[0].lower() == "basis"
+            or str(repeated_parent.get("goh_bone_name") or "").lower() == "basis"
+        )
+        repeated_parent_is_turret = repeated_parent is not None and (
+            repeated_parent.name.split(".", 1)[0].lower() == "turret"
+            or str(repeated_parent.get("goh_bone_name") or "").lower() == "turret"
+        )
+        if not repeated_parent_is_basis or repeated_parent_is_turret:
+            raise RuntimeError("Repeated fire trigger generation reparented trigger volumes away from basis.")
+        if (repeated_front.location - first_front_location).length > 1e-6:
+            raise RuntimeError("Repeated fire trigger generation moved basis trigger volumes toward turret.")
+        repeated_point_basis_location = trigger_basis.matrix_world.inverted_safe() @ repeated_point.matrix_world.to_translation()
+        if (repeated_point_basis_location - first_point_basis_location).length > 1e-6:
+            raise RuntimeError("Repeated fire trigger generation changed gun_recoil basis-space alignment.")
+        cleanup_names = [*expected_trigger_angles.keys(), "gun_recoil"]
+        if created_trigger_turret:
+            cleanup_names.append("turret")
+        if created_trigger_basis:
+            cleanup_names.append("basis")
+        for object_name in cleanup_names:
+            obj = bpy.data.objects.get(object_name)
+            if obj is not None:
+                mesh = obj.data if obj.type == "MESH" else None
+                bpy.data.objects.remove(obj, do_unlink=True)
+                if mesh is not None and mesh.users == 0:
+                    bpy.data.meshes.remove(mesh)
+
         bpy.ops.object.select_all(action="DESELECT")
         recoil_source.select_set(True)
         bpy.context.view_layer.objects.active = recoil_source
         scene.frame_set(100)
         tool_settings.physics_direction_set = "FOUR_FIRE"
         tool_settings.physics_clip_prefix = "fire"
+        tool_settings.physics_body_sway_strength = 1.0
+        tool_settings.physics_antenna_sway_strength = 1.0
+        tool_settings.physics_antenna_mount = "TURRET"
         tool_settings.physics_create_nla_clips = True
         directional_result = bpy.ops.object.goh_bake_directional_recoil_set()
         if "FINISHED" not in directional_result:
@@ -1009,22 +1147,107 @@ def main() -> None:
             raise RuntimeError("Directional recoil bake did not record expected fire_front clip ranges.")
         if any(track.name.startswith("GOH Physics") for track in recoil_source.animation_data.nla_tracks):
             raise RuntimeError("Directional recoil bake should keep generated keys on the active timeline action.")
+        front_segments = physics_action_segments(recoil_source, "fire_front")
+        front_start = int(front_segments[0]["frame_start"])
+        if front_start != scene.frame_start:
+            raise RuntimeError("Directional recoil bake should rebuild the set from the scene start frame, not the current frame.")
+        scene.frame_set(front_start)
+        front_source_rest = recoil_source.location.copy()
+        front_body_rest = recoil_body.location.copy()
+        scene.frame_set(front_start + max(1, int(tool_settings.recoil_frames) // 4))
+        if (recoil_source.location - front_source_rest).x >= -0.001:
+            raise RuntimeError("Directional fire_front should recoil the source backward on -X before returning.")
+        left_segment = next(segment for segment in physics_action_segments(recoil_source) if segment["name"] == "fire_left")
+        left_start = int(left_segment["frame_start"])
+        scene.frame_set(left_start)
+        left_source_rest = recoil_source.location.copy()
+        scene.frame_set(left_start + max(1, int(tool_settings.recoil_frames) // 4))
+        left_source_delta = recoil_source.location - left_source_rest
+        if left_source_delta.x >= -0.001 or abs(left_source_delta.y) > max(0.001, abs(left_source_delta.x) * 0.05):
+            raise RuntimeError("Directional barrel recoil should stay on the fixed X/-X stroke even for side fire clips.")
+        front_body_samples = []
+        for probe_frame in range(front_start + 1, front_start + int(tool_settings.recoil_frames) + 1):
+            scene.frame_set(probe_frame)
+            front_body_samples.append(
+                (
+                    probe_frame,
+                    float((recoil_body.location - front_body_rest).x),
+                    float(recoil_body.rotation_euler.y),
+                )
+            )
+        first_back_sample = min(front_body_samples, key=lambda item: item[1])
+        if first_back_sample[1] >= -0.001:
+            raise RuntimeError("Directional fire_front should move the body backward before the forward return.")
+        if max((sample[1] for sample in front_body_samples if sample[0] > first_back_sample[0]), default=0.0) <= 0.001:
+            raise RuntimeError("Directional fire_front body spring should return forward after the backward kick.")
+        if min(sample[2] for sample in front_body_samples[: max(2, len(front_body_samples) // 2)]) >= -0.001:
+            raise RuntimeError("Directional fire_front body spring should start nose-up, not nose-down.")
+        antenna_shape_keys = recoil_antenna.data.shape_keys
+        antenna_shape_action = (
+            antenna_shape_keys.animation_data.action
+            if antenna_shape_keys is not None and antenna_shape_keys.animation_data is not None
+            else None
+        )
+        antenna_shape_segments = exporter_module._physics_load_action_segments(antenna_shape_action)
+        if (
+            antenna_shape_keys is None
+            or antenna_shape_action is None
+            or not any(segment["name"] == "fire_front" for segment in antenna_shape_segments)
+        ):
+            raise RuntimeError("Directional recoil bake did not keep antenna whip clip metadata.")
+        directional_anchor = exporter_module._physics_antenna_anchor_axis(recoil_antenna.data)
+        if directional_anchor is None:
+            raise RuntimeError("Directional antenna regression lost the antenna principal axis.")
+        directional_axis, directional_min_anchor, directional_max_anchor = directional_anchor
+        directional_positions = [vertex.co.copy() for vertex in recoil_antenna.data.vertices]
+        directional_projections = [position.dot(directional_axis) for position in directional_positions]
+        directional_tip_indices = [
+            index
+            for index, projection in enumerate(directional_projections)
+            if projection >= directional_max_anchor - (directional_max_anchor - directional_min_anchor) * 0.005
+        ]
+        directional_tip_rest = Vector((0.0, 0.0, 0.0))
+        for index in directional_tip_indices:
+            directional_tip_rest += recoil_antenna.matrix_world @ directional_positions[index]
+        directional_tip_rest /= float(max(1, len(directional_tip_indices)))
+        directional_front_keys = [
+            key
+            for key in antenna_shape_keys.key_blocks
+            if key.name.startswith("GOH_AntennaWhip_fire_front_")
+        ]
+        directional_antenna_delay = int(recoil_antenna.get("goh_physics_delay", 0))
+        directional_antenna_probe_frame = (
+            front_start
+            + directional_antenna_delay
+            + max(1, int(tool_settings.recoil_frames) // 4)
+        )
+        directional_peak_key = min(
+            directional_front_keys,
+            key=lambda key: abs(int(key.name.rsplit("_", 1)[-1]) - directional_antenna_probe_frame),
+        )
+        directional_tip_peak = Vector((0.0, 0.0, 0.0))
+        for index in directional_tip_indices:
+            directional_tip_peak += recoil_antenna.matrix_world @ directional_peak_key.data[index].co
+        directional_tip_peak /= float(max(1, len(directional_tip_indices)))
+        directional_tip_delta = directional_tip_peak - directional_tip_rest
+        if directional_tip_delta.x <= 0.001 or abs(directional_tip_delta.y) > max(0.001, abs(directional_tip_delta.x) * 0.08):
+            raise RuntimeError("Directional antenna whip should start as a fixed X/-X sway toward +X.")
 
         bpy.ops.object.select_all(action="DESELECT")
         recoil_body.select_set(True)
         bpy.context.view_layer.objects.active = recoil_body
         scene.frame_set(200)
         tool_settings.physics_impact_clip_name = "hit_body"
-        fire_segment_count_before = len(physics_action_segments(recoil_body, "fire"))
+        fire_segment_count_before = len(physics_action_segments(recoil_body, "fire_front"))
         impact_result = bpy.ops.object.goh_bake_impact_response()
         if "FINISHED" not in impact_result:
             raise RuntimeError(f"Impact response bake failed: {impact_result}")
         if not physics_action_segments(recoil_body, "hit_body"):
             raise RuntimeError("Impact response did not record a hit_body clip range.")
-        if len(physics_action_segments(recoil_body, "fire")) != fire_segment_count_before:
+        if len(physics_action_segments(recoil_body, "fire_front")) != fire_segment_count_before:
             raise RuntimeError("Impact response bake should not replace earlier linked recoil clip ranges.")
         range_text = str(recoil_body.get("goh_sequence_ranges") or "")
-        if "fire:" not in range_text or "hit_body:" not in range_text:
+        if "fire_front:" not in range_text or "hit_body:" not in range_text:
             raise RuntimeError("Impact response bake did not keep a readable multi-sequence range list.")
         if getattr(recoil_body.animation_data, "action", None) is None:
             raise RuntimeError("Impact response should keep visible keyframes on the active timeline action.")

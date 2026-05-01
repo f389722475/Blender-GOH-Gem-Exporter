@@ -467,9 +467,15 @@ Use separate short clips for:
 - `fire_back`
 - `fire_left`
 - `fire_right`
+- `fire_fl`
+- `fire_bl`
+- `fire_br`
+- `fire_fr`
 - `hit`
 - `open`
 - `close`
+
+For recoil trigger setup, use `Create Fire Trigger Volumes` to add `recoil_gun_*_vol` pie slices under `basis` and a `gun_recoil` point under `turret`. Four-way slices align `front/back/left/right` to `+X/-X/+Y/-Y`; eight-way slices add `fl/bl/br/fr`.
 
 ## 14. Export
 
